@@ -32,7 +32,7 @@ COPY --from=uki-addons / /usr/share/secureblue/uki/addons/
 COPY uki/keys/*/*.auth /usr/share/secureblue/uki/keys/
 COPY uki/keys/*/*.der /usr/share/secureblue/uki/keys/
 COPY uki/keys/PCR/PCR.pem /usr/share/secureblue/uki/keys/
-# scroll-secure: ESLs + owner GUID for enroll-secure-boot-keys (option ROM hashes)
+# scroll-secure: ESLs + owner GUID for secure-boot-keys enroll (option ROM hashes)
 COPY uki/keys/*/*.esl uki/keys/GUID /usr/share/secureblue/uki/keys/
 
 # Make sure we pass the lints

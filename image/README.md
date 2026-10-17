@@ -27,9 +27,9 @@ AMD R9700 on amdgpu.
 |---|---|
 | `Containerfile` | Root filesystem: build scroll (static wlroots) in `fedora:44`, then layer it onto the pinned secureblue image |
 | `build.sh` | Full sealed build: rootfs → kernel → signed systemd-boot → signed addons → base → signed UKI |
-| `uki/` | secureblue's sealed-UKI pipeline, plus `create-keys.sh`. `install.sh` is patched for our image and cosign key |
+| `uki/` | secureblue's sealed-UKI pipeline, plus `secure-boot-keys.sh`. `install.sh` is patched for our image and cosign key |
 | `uki/keys/` | Public keys only (PK/KEK/db certs, `.auth`, `.esl`, PCR.pem, GUID). Built into the image at `/usr/share/secureblue/uki/keys/` |
-| `files/usr/libexec/scroll-secure/enroll-secure-boot-keys` | Firmware enrollment with option ROM hashes. Use this, **not** `ujust enroll-secure-boot-keys` |
+| `uki/secure-boot-keys.sh` → `/usr/libexec/scroll-secure/secure-boot-keys` | `create` the keys (trusted machine), `enroll` them into the firmware with option ROM hashes, `status`. Use this, **not** `ujust enroll-secure-boot-keys` |
 | `files/etc/pam.d/swaylock` | Unlock = FIDO2 key + client PIN + touch, mapping file in `/etc` |
 | `../lockscreen/` (build context `lockscreen`) | hardened-unlock, a GTK4 ext-session-lock locker. Unlock = FIDO2 key + PIN + touch, **then** the account password. Bound to Mod+Alt+L, 5 min idle and suspend via `/etc/scroll/config.d/50-hardened-unlock.conf` |
 | `files/usr/share/wayland-sessions/scroll-pixman.desktop` | SDDM session: scroll with `WLR_RENDERER=pixman` |
@@ -44,7 +44,7 @@ Run this on a trusted machine and keep `SECRETS_DIR` on offline/encrypted media.
 works.
 
 ```sh
-SECRETS_DIR=/media/keys/scroll-secure image/uki/create-keys.sh
+SECRETS_DIR=/media/keys/scroll-secure image/uki/secure-boot-keys.sh create
 cosign generate-key-pair      # image signature; cosign.pub goes next to Containerfile
 ```
 
@@ -153,9 +153,11 @@ The full list is in `LUKS.md`, under "Re-enrolling is required when".
    the image if the cosign signature verifies. It creates ESP (2G) + LUKS2 → btrfs and runs
    `bootc install --composefs-backend --bootloader=systemd`. At the Secure Boot prompt,
    choose **2 (Platform Key)**.
-3. First boot, still in Setup Mode: `run0 /usr/libexec/scroll-secure/enroll-secure-boot-keys --dry-run`.
-   Check that it lists the option ROMs (2 on this machine today), then run it without
-   `--dry-run`. Turn Secure Boot on in firmware setup and reboot.
+3. First boot, still in Setup Mode: `run0 /usr/libexec/scroll-secure/secure-boot-keys enroll --dry-run`.
+   Check that every ESP binary shows `signed` and that it lists the option ROMs (2 on this
+   machine today), then run it without `--dry-run`. It refuses if the event log can't be
+   read, and backs up the old variables to `/root/secure-boot-backup-*`. Turn Secure Boot
+   on in firmware setup and reboot; `secure-boot-keys status` shows the result.
 4. Enroll tokenvault only **after** step 3, because enrolling the keys changes PCR 7. Follow
    `LUKS.md` → "On the real machine: order of steps". Keep the install passphrase: it's
    keyslot 0, your recovery key. Re-enrolling is required after a PCR key rotation,

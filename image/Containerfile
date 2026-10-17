@@ -95,6 +95,8 @@ RUN systemctl enable \
       virtnodedevd.socket virtsecretd.socket virtlogd.socket
 
 COPY files/ /
+# Secure Boot key creation/enrollment (option ROM hashes into db); see README.md.
+COPY uki/secure-boot-keys.sh /usr/libexec/scroll-secure/secure-boot-keys
 
 # tokenvault: TPM2+FIDO2 LUKS unlock (see LUKS.md)
 # The initramfs is rebuilt from the dracut config in uki/Containerfile.uki;
@@ -114,7 +116,7 @@ RUN for b in bash cryptsetup systemd-cryptenroll /usr/lib/systemd/systemd-crypts
 RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
  && semodule -l | grep -qx tokenvault
 
-RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/enroll-secure-boot-keys \
+RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
  && bootc container lint
 
 LABEL org.opencontainers.image.title="scroll-secure" \

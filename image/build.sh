@@ -7,7 +7,7 @@
 #
 #   SECRETS_DIR=... ./build.sh [tag]          # default tag: localhost/scroll-secure:uki
 #
-# Needs: uki/keys/ from uki/create-keys.sh, and db.key + PCR.key in $SECRETS_DIR.
+# Needs: uki/keys/ from `uki/secure-boot-keys.sh create`, and db.key + PCR.key in $SECRETS_DIR.
 # Only those two private keys are mounted into the build, as podman secrets;
 # PK.key and KEK.key are never used here.
 set -euo pipefail
@@ -19,7 +19,7 @@ release=$(sed -n 's/^ARG FEDORA_VERSION=//p' Containerfile)
 p=localhost/scroll-secure
 
 for f in uki/keys/db/db.pem uki/keys/PCR/PCR.pem "${secrets}/db.key" "${secrets}/PCR.key"; do
-    [[ -r "${f}" ]] || { echo "missing ${f}; run uki/create-keys.sh first" >&2; exit 1; }
+    [[ -r "${f}" ]] || { echo "missing ${f}; run uki/secure-boot-keys.sh create first" >&2; exit 1; }
 done
 sign=(
     --secret "id=secureboot_key,src=${secrets}/db.key"

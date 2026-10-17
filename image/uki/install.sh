@@ -333,7 +333,7 @@ as the password.
 EOF
 else
 cat << 'EOF'
-After logging in, run `run0 /usr/libexec/scroll-secure/enroll-secure-boot-keys`
+After logging in, run `run0 /usr/libexec/scroll-secure/secure-boot-keys enroll`
 (NOT `ujust enroll-secure-boot-keys`: it would block the GPU's option ROM).
 
 Make sure your device is in Setup Mode first by deleting the Platform Key in
