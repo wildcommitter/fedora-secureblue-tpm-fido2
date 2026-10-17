@@ -70,6 +70,11 @@ motd = f"""
 
 """.encode()
 
+autologin = b"""[Service]
+ExecStart=
+ExecStart=-/usr/sbin/agetty --autologin core --noclear %I $TERM
+"""
+
 print(json.dumps({
     "ignition": {"version": "3.4.0"},
     "storage": {"files": [
@@ -78,15 +83,22 @@ print(json.dumps({
         file("/var/lib/scroll-secure/cosign.pub", read("cosign.pub")),
         file("/usr/local/bin/scroll-secure-install", wrapper, 0o755),
         file("/etc/motd.d/50-scroll-secure.motd", motd),
+        # FCOS turns off its live autologin when an Ignition config is
+        # embedded; bring it back so the console lands on a shell (core has
+        # passwordless sudo on the live system, which runs only in RAM).
+        file("/etc/systemd/system/getty@tty1.service.d/50-autologin.conf", autologin),
+        file("/etc/systemd/system/serial-getty@.service.d/50-autologin.conf", autologin),
     ]},
 }))
 EOF
 
 iso="scroll-secure-installer-$(date -u +%Y%m%d).iso"
+rm -f "${out}/${iso}" "${out}/${iso}.sha256"
 podman run --rm -v "${work}:/data:Z" -v "${out}:/out:Z" -w /data "${installer}" \
     iso ignition embed -f -i live.ign -o "/out/${iso}" "/data/$(basename "${base}")"
 
 cd "${out}"
+chmod 0644 "${iso}"
 {
     echo "# ${iso}: $(stat -c %s "${iso}") bytes, Fedora CoreOS ${fcos_version}, installs ${image_ref}"
     sha256sum "${iso}"
