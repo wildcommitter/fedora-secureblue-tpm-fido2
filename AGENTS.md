@@ -67,8 +67,20 @@ lockscreen/build.sh                       # Fedora 44 container -> lockscreen/ou
 image/uki/secure-boot-keys.sh create      # new key hierarchy (refuses to overwrite)
 ```
 
-The image build runs `bootc container lint --fatal-warnings` and
-`/usr/libexec/tokenvault/check-uki` (from `image/files-luks/`) on the signed UKI. Both must pass.
+The image build runs `bootc container lint --fatal-warnings` (in `uki/Containerfile.base`)
+and `/usr/libexec/tokenvault/check-uki` (from `image/files-luks/`) on the signed UKI. Both must pass.
+
+- **Dev builds use a scratch copy.** Put dev keys in a copy of `image/` (with `lockscreen/`
+  next to it) and run `secure-boot-keys.sh create --keys <copy>/uki/keys --secrets <scratch>`
+  there. Run without `--keys`, it writes into the tracked `image/uki/keys/`, and dev keys
+  would be committed and embedded in the image.
+- **Key layout:** nested in the repo (`uki/keys/{PK,KEK,db,PCR}/`, plus `GUID`), but flat
+  in the image (`/usr/share/secureblue/uki/keys/`, copied by `uki/Containerfile.base`).
+  `secure-boot-keys.sh` accepts both.
+- **Building `image/Containerfile` by hand** needs `--build-context lockscreen=../lockscreen`.
+  `build.sh` passes it.
+- **`uki/` is vendored.** Our changes are marked `scroll-secure:`. Re-apply them when
+  re-vendoring, and update `uki/VENDORED`.
 
 ## Test
 
@@ -91,6 +103,8 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
 - **bootc composefs installs only from a registry.** `build-disk.sh` pushes to a loopback
   registry. containers-storage and save/load both fail (splitstream errors, manifest
   integrity).
+- **Nothing may land in the image's `/var`** (bootc lint). `dnf` runs with
+  `--mount=type=tmpfs,target=/var`, and state directories come from `tmpfiles.d`.
 - **The hardened kernel has no 9p.** Feed files to the guest as a read-only tar disk
   (`/dev/vdb`).
 - **Pipes under `set -o pipefail`:** `grep -q` closes the pipe early and the writer dies with
