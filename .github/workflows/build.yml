@@ -1,0 +1,158 @@
+# Build, sign and publish the sealed scroll-secure image and its installer ISO.
+#
+# Whoever runs this signs the result. This repo signs with the project keys;
+# a fork signs with its own (see image/README.md, "Your own signed build").
+# The job only runs when the `signing` environment has these secrets:
+#   SB_DB_KEY        Secure Boot db private key (PEM)       -> signs systemd-boot, UKI, addons
+#   SB_PCR_KEY       PCR 11 policy private key (PEM)        -> signs the TPM policy
+#   COSIGN_KEY       cosign private key                     -> signs the container image
+#   COSIGN_PASSWORD  its password
+# and the matching public material is committed: image/uki/keys/, image/cosign.pub.
+
+name: build
+
+permissions: {}
+
+on:
+  push:
+    branches: [main]
+    paths: ["image/**", "lockscreen/**", ".github/workflows/build.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and sign the sealed image
+    runs-on: ubuntu-26.04
+    environment: signing
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ref: ${{ steps.push.outputs.ref }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check for signing keys
+        id: keys
+        env:
+          SB_DB_KEY: ${{ secrets.SB_DB_KEY }}
+          SB_PCR_KEY: ${{ secrets.SB_PCR_KEY }}
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+        run: |
+          if [[ -n "${SB_DB_KEY}" && -n "${SB_PCR_KEY}" && -n "${COSIGN_KEY}" ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::No signing secrets in the 'signing' environment; nothing to build. See image/README.md."
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Free disk space
+        if: steps.keys.outputs.present == 'true'
+        uses: hastd/free-disk-space@68572aeaadb7f76bd408246328e95926323402b5 # v0.1.2
+        with:
+          skip-if-available: "64G"
+
+      - name: Check out
+        if: steps.keys.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        if: steps.keys.outputs.present == 'true'
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+        with:
+          cosign-release: "v2.6.0"
+
+      - name: Build (signs systemd-boot, UKI, addons, PCR policy)
+        if: steps.keys.outputs.present == 'true'
+        env:
+          SB_DB_KEY: ${{ secrets.SB_DB_KEY }}
+          SB_PCR_KEY: ${{ secrets.SB_PCR_KEY }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          keys="${RUNNER_TEMP}/keys"
+          install -d -m 700 "${keys}"
+          trap 'rm -rf "${keys}"' EXIT
+          printenv SB_DB_KEY > "${keys}/db.key"
+          printenv SB_PCR_KEY > "${keys}/PCR.key"
+          # The committed public keys must match the secrets, or every boot fails.
+          [[ "$(openssl pkey -in "${keys}/db.key" -pubout)" == "$(openssl x509 -in image/uki/keys/db/db.pem -noout -pubkey)" ]] \
+            || { echo "::error::SB_DB_KEY does not match image/uki/keys/db/db.pem"; exit 1; }
+          [[ "$(openssl pkey -in "${keys}/PCR.key" -pubout)" == "$(cat image/uki/keys/PCR/PCR.pem)" ]] \
+            || { echo "::error::SB_PCR_KEY does not match image/uki/keys/PCR/PCR.pem"; exit 1; }
+          owner="${OWNER,,}"
+          SECRETS_DIR="${keys}" image/build.sh "ghcr.io/${owner}/scroll-secure:uki"
+
+      - name: Push and sign
+        id: push
+        if: steps.keys.outputs.present == 'true'
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner="${OWNER,,}"
+          repo="ghcr.io/${owner}/scroll-secure"
+          printenv GH_TOKEN | podman login ghcr.io -u "${ACTOR}" --password-stdin
+          tag="$(date -u +%Y%m%d)-uki"
+          podman tag "${repo}:uki" "${repo}:${tag}"
+          podman push --digestfile "${RUNNER_TEMP}/digest" "${repo}:uki"
+          podman push "${repo}:${tag}"
+          digest="$(cat "${RUNNER_TEMP}/digest")"
+          printenv GH_TOKEN | cosign login ghcr.io -u "${ACTOR}" --password-stdin
+          cosign sign -y --key env://COSIGN_KEY "${repo}@${digest}"
+          cosign verify --key image/cosign.pub "${repo}@${digest}" > /dev/null
+          echo "ref=${repo}:uki" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed and signed ${repo}@${digest} (tags uki, ${tag})" >> "${GITHUB_STEP_SUMMARY}"
+
+  iso:
+    name: Build the installer ISO
+    needs: image
+    if: needs.image.outputs.digest != ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build ISO
+        env:
+          REF: ${{ needs.image.outputs.ref }}
+        run: image/iso/build-iso.sh "${REF}" "${RUNNER_TEMP}/iso"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ needs.image.outputs.ref }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="iso-$(date -u +%Y%m%d-%H%M)"
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            echo "Installer ISO for \`${REF}\` (\`${DIGEST}\`), built from ${SHA}."
+            echo
+            echo "1. Check the checksum: \`sha256sum -c scroll-secure-installer-*.iso.sha256\`."
+            echo "2. Write it to a USB stick and boot it; read the on-screen notes, then run \`sudo scroll-secure-install\` (wipes the disk you pick)."
+            echo "3. The installer pulls the image only if its cosign signature verifies against the key inside the ISO."
+            echo
+            echo "Not audited. Read the threat model first: https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/threat-model.html"
+          } > "${notes}"
+          gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --target "${SHA}" \
+            --title "Installer ${tag#iso-}" --notes-file "${notes}" \
+            "${RUNNER_TEMP}"/iso/*

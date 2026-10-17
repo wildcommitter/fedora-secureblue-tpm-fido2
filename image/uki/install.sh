@@ -280,10 +280,12 @@ Choose a secure boot option:
    many bootloaders and ROMs. This greatly increases attack surface but is
    compatible with all hardware.
 
-2. secureblue Platform Key - WARNING: Not suitable for all devices.
-   Your firmware will only trust secureblue. This offers improved security, but
-   this can BRICK YOUR DEVICE by breaking the display if your external GPU
-   requires an option ROM to work.
+2. Platform Key - your firmware will only trust this image's signing key.
+   Needs Secure Boot in Setup Mode. After the first boot, enroll the keys with
+   `run0 /usr/libexec/scroll-secure/secure-boot-keys enroll --dry-run` first:
+   it adds your GPU's option ROM hashes so the display keeps working. Other
+   tools (ujust enroll-secure-boot-keys) can leave a discrete GPU with NO
+   DISPLAY (clear CMOS to recover).
 
 EOF
 read -r -p "Choose an option (1 or 2): " secure_boot

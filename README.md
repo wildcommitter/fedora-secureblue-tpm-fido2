@@ -8,6 +8,9 @@ scroll, plus everything needed to unlock the disk and the screen with hardware t
 | `image/` | The OS image: secureblue Sericea + scroll, bootc/composefs, systemd-boot, a sealed UKI signed with our own keys. Includes install, key handling and the **pre-install checklist** | `image/README.md` |
 | `image/files-luks/` | **tokenvault**: boot-time disk unlock. You enter the TPM2 PIN and the FIDO2 PIN and touch the key; together they open a vault on the ESP that holds the root keyslot's passphrase | `image/LUKS.md` |
 | `lockscreen/` | **hardened-unlock**: the scroll lock screen. Unlock needs the FIDO2 key PIN, a touch and the account password, each asked separately | `lockscreen/README.md` |
+| `docs/` | The public site (GitHub Pages): landing page, disk unlock, own Secure Boot keys, Qubes OS comparison, threat model | https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/ |
+| `.github/workflows/build.yml` | CI: builds and signs the image with the `signing` environment's secrets, then publishes the installer ISO | `image/README.md` → Who signs what |
+| `SECURITY.md` | How to report vulnerabilities privately | |
 | `test/` | KVM e2e for tokenvault (`test/bootc`: OVMF Secure Boot, swtpm, virtual FIDO2 key) and the shared harness and virtual key (`test/e2e.py`, `test/vfido`) | `image/LUKS.md` → Tests |
 
 Tests never touch the host's TPM, its real FIDO2 key, its disks or its PAM. They use

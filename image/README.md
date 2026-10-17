@@ -35,17 +35,48 @@ AMD R9700 on amdgpu.
 | `files/usr/share/wayland-sessions/scroll-pixman.desktop` | SDDM session: scroll with `WLR_RENDERER=pixman` |
 | `files/usr/libexec/scroll-headless`, `files/etc/scroll/headless.conf` | Headless pixman session, wayvnc on `127.0.0.1:5900` |
 | `files/usr/lib/systemd/user/scroll-headless.service` | Starts it as a user service (off by default) |
+| `iso/build-iso.sh` | Installer ISO: Fedora CoreOS live ISO + embedded installer, db cert, cosign key, image ref |
+| `../.github/workflows/build.yml` | CI: build, sign, push, cosign, then the ISO as a release. Only runs with signing secrets |
 | `files-luks/**`, `LUKS.md` | tokenvault: TPM2+PIN, then FIDO2+PIN+touch, unlocks root. The initramfs is built in `uki/Containerfile.uki` |
 
-## Keys (once)
+## Who signs what
 
-Run this on a trusted machine and keep `SECRETS_DIR` on offline/encrypted media. It needs
-`openssl`, `sbsigntools` and `systemd` (for `systemd-id128`); a `fedora:44` container
-works.
+Every sealed image is signed by whoever builds it, and a machine trusts exactly the keys
+it enrolls. There are two signers:
+
+| Signer | Public keys | Private keys | Used by |
+|---|---|---|---|
+| **Project** (this repo's CI) | committed: `uki/keys/`, `cosign.pub` | GitHub Actions secrets in the `signing` environment, plus an offline backup | The public image `ghcr.io/wildcommitter/scroll-secure:uki` and the installer ISO in [Releases](https://github.com/wildcommitter/fedora-secureblue-tpm-fido2/releases) |
+| **You** (a fork, or a local build) | your fork's `uki/keys/`, `cosign.pub` | your offline media or your fork's secrets | Only your machines. Nobody else can sign kernels that boot or unlock them |
+
+Installing the project image means trusting the project's CI the way stock PCs trust
+Microsoft. Building your own removes that trust: no one else can sign a kernel that your
+firmware runs or your TPM unlocks.
+
+### Your own signed build
+
+Create keys on a trusted machine and keep `SECRETS_DIR` on offline or encrypted media.
+`create` needs `openssl`, `sbsigntools` and `efitools`; a `fedora:44` container works.
 
 ```sh
-SECRETS_DIR=/media/keys/scroll-secure image/uki/secure-boot-keys.sh create
-cosign generate-key-pair      # image signature; cosign.pub goes next to Containerfile
+SECRETS_DIR=/media/keys/scroll-secure image/uki/secure-boot-keys.sh create --keys image/uki/keys
+cosign generate-key-pair      # cosign.pub goes to image/cosign.pub
+```
+
+In a fork, the public files replace the project's (`git rm -r image/uki/keys image/cosign.pub`
+before `create`). Commit yours and add the secrets to an environment named `signing`:
+`SB_DB_KEY` (db.key), `SB_PCR_KEY` (PCR.key), `COSIGN_KEY` (cosign.key) and
+`COSIGN_PASSWORD`. Every push to `main` then builds, signs and pushes
+`ghcr.io/<you>/scroll-secure:uki`, and publishes an installer ISO for it as a release.
+Without those secrets, the workflow builds nothing.
+
+Locally, build in a copy of `image/` (with `lockscreen/` next to it) that holds your keys:
+
+```sh
+SECRETS_DIR=/media/keys/scroll-secure image/build.sh ghcr.io/<you>/scroll-secure:uki
+podman push ghcr.io/<you>/scroll-secure:uki
+cosign sign --key cosign.key ghcr.io/<you>/scroll-secure:uki
+image/iso/build-iso.sh ghcr.io/<you>/scroll-secure:uki out/
 ```
 
 | Private key | Used for | If lost |
@@ -55,16 +86,14 @@ cosign generate-key-pair      # image signature; cosign.pub goes next to Contain
 | `KEK.key`, `PK.key` | Changing firmware keys | Clear keys in firmware setup (Setup Mode) instead |
 | `cosign.key` | Signing the container image | Install/update rejects new images |
 
-## Build, sign, publish
-
-```sh
-SECRETS_DIR=/media/keys/scroll-secure image/build.sh ghcr.io/<you>/scroll-secure:uki
-podman push ghcr.io/<you>/scroll-secure:uki
-cosign sign --key cosign.key ghcr.io/<you>/scroll-secure:uki
-```
-
 Only `db.key` and `PCR.key` go into the build, as podman secrets. They aren't stored in
-any layer.
+any layer. CI checks that the secrets match the committed public keys before building.
+
+### The installer ISO
+
+`iso/build-iso.sh` takes the official Fedora CoreOS live ISO (downloaded and GPG-verified
+by `coreos-installer`) and embeds only `uki/install.sh`, the db certificate, `cosign.pub`
+and the image reference. Boot it and run `sudo scroll-secure-install`.
 
 ## Before you install: checks on the real machine
 
@@ -148,7 +177,8 @@ The full list is in `LUKS.md`, under "Re-enrolling is required when".
 
 1. Firmware: put Secure Boot in **Setup Mode** ("Delete Platform Key" / "Clear Secure Boot
    Keys", not "Reset to default").
-2. Boot the Fedora CoreOS live ISO, `git clone` this repo, then:
+2. Boot the installer ISO (check its `.sha256` first) and run `sudo scroll-secure-install`.
+   Or boot a stock Fedora CoreOS live ISO, `git clone` this repo and run
    `sudo image/uki/install.sh ghcr.io/<you>/scroll-secure:uki`. The installer only pulls
    the image if the cosign signature verifies. It creates ESP (2G) + LUKS2 → btrfs and runs
    `bootc install --composefs-backend --bootloader=systemd`. At the Secure Boot prompt,

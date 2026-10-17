@@ -46,7 +46,9 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 - **Secrets never enter the repo.** Private keys (`db.key`, `PCR.key`, `PK.key`, `KEK.key`,
   `cosign.key`) live in `SECRETS_DIR` on offline media (default
   `~/.local/share/scroll-secure/secrets`). Only public material goes in `image/uki/keys/`
-  and `image/cosign.pub`. `.gitignore` excludes `*.key`; don't weaken it with
+  and `image/cosign.pub`, and those are the **project** keys that CI signs with (secrets in
+  the GitHub `signing` environment). Never replace them with dev or personal keys in this
+  repo. `.gitignore` excludes `*.key`; don't weaken it with
   `*.pem`/`*.auth` rules, because `uki/keys/` must stay tracked.
 - **Dev keys and lab aids are throwaway and lab-only.** This covers the serial-console UKI
   addon, root autologin in `build-disk.sh`, and the lab passphrases. Never put them in the
