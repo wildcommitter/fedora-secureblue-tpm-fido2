@@ -1,0 +1,20 @@
+#%PAM-1.0
+# Installed to /etc/pam.d/hardened-unlock.
+#
+# Unlock = the FIDO2 key with its client PIN and a touch, AND the account
+# password. Neither alone unlocks the screen. hardened-unlock asks each prompt
+# separately ("Please enter the PIN", then "Password"), so unlike swaylock the
+# key PIN and the password don't have to be the same.
+#
+# The key comes first and is `requisite`: without it the password is never
+# asked, so the password can't be guessed at the lock screen without the key.
+# It uses the same root-owned mapping file and origin as /etc/pam.d/swaylock,
+# so one `pamu2fcfg` registration serves both. Once a fingerprint is enrolled
+# on the key, replace pinverification=1 with userverification=1.
+#
+# The password goes through the stock system-auth stack (pam_unix via
+# unix_chkpwd, plus pam_faillock), as a substack so its `sufficient` pam_unix
+# can't end the whole stack before the key is checked.
+auth     requisite pam_u2f.so authfile=/etc/u2f_mappings cue origin=pam://workstation appid=pam://workstation pinverification=1 userpresence=1 max_devices=4
+auth     substack  system-auth
+account  include   login

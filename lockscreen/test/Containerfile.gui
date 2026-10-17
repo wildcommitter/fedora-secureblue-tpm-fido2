@@ -1,0 +1,6 @@
+# Test-only layer on the image rootfs: the locker's runtime library (which the
+# image itself must ship too) plus wtype, which types through the
+# virtual-keyboard protocol into whatever has focus -- the lock surface.
+ARG IMAGE=localhost/scroll-secure-rootfs:latest
+FROM ${IMAGE}
+RUN dnf -y install gtk4-layer-shell wtype dbus-daemon && dnf clean all
