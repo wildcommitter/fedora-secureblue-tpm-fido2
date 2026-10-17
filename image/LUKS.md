@@ -87,6 +87,17 @@ run0 tokenvault enroll    # rotate everything; the old vault keyslot is retired
 run0 tokenvault remove    # kill the vault keyslot, delete the vault
 ```
 
+**Which keyslot is the vault's.** `enroll` records it in the root volume's LUKS2 header as
+a token of type `tokenvault` (`cryptsetup luksDump` lists it under Tokens), and also in
+`/etc/tokenvault/state`. The header record travels with the disk. No cryptsetup plugin
+handles that type, so nothing ever tries to unlock with it. `remove` and `enroll` (on
+rotation) kill exactly the recorded keyslots.
+
+If both records are lost but a keyslot in tokenvault's format (PBKDF2 with 1000
+iterations, which a recovery passphrase never uses) is still there, `remove` refuses to
+report success. It names that keyslot instead; check it with `cryptsetup luksDump`, then run
+`run0 tokenvault remove --keyslot N`.
+
 Before the first enroll:
 
 - Enroll the Secure Boot keys (`run0 /usr/libexec/scroll-secure/secure-boot-keys enroll`) and reboot, because PCR 7 must be

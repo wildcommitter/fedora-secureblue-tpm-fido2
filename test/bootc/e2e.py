@@ -121,7 +121,10 @@ def sc_setup(lab):
     if "enrolled: vault keyslot" not in out:
         raise Fail("enroll did not finish")
     ev = lab.vfido_events(vmark)
-    if e2e.vfido_count(ev, "pin=set") != 1 or e2e.vfido_count(ev, "up=granted") < 2:
+    # the PIN is set once, unless the (persistent) virtual key already has it
+    pin_ok = e2e.vfido_count(ev, "pin=set") == 1 or (
+        e2e.vfido_count(ev, "pin=set") == 0 and "key already has the configured PIN" in out)
+    if not pin_ok or e2e.vfido_count(ev, "up=granted") < 2:
         raise Fail(f"unexpected key activity during enroll:\n{ev}")
     log("status:\n" + tv(ser, "status"))
     lab.poweroff()
@@ -169,16 +172,27 @@ def sc_sealed(lab):
     lab.poweroff()
 
 
+ROOT_DEV = "$(cryptsetup status root | awk '$1==\"device:\"{print $2}')"
+
+
+def vault_tokens(ser):
+    """Number of tokenvault keyslot records in the root volume's LUKS header."""
+    return ser.value(f"cryptsetup luksDump {ROOT_DEV} | grep -cE '^  [0-9]+: tokenvault$'")
+
+
 def sc_remove(lab):
     """remove: vault keyslot killed, vault deleted -> plain passphrase boot."""
     ser = lab.boot("remove")
     e2e.unlock_with_tokens(lab, ser)
     lab.wait_shell(300)
+    # The keyslot record must come from the LUKS header alone.
+    ser.check("rm -f /etc/tokenvault/state")
     tv(ser, "remove 2>&1 | tail -3", 300)
-    n = ser.value("cryptsetup luksDump $(cryptsetup status root | awk '$1==\"device:\"{print $2}') "
-                  "| grep -cE '^  [0-9]+: luks2'")
+    n = ser.value(f"cryptsetup luksDump {ROOT_DEV} | grep -cE '^  [0-9]+: luks2'")
     if n != "1":
         raise Fail(f"expected only the recovery keyslot left, found {n}")
+    if vault_tokens(ser) != "0":
+        raise Fail("a tokenvault record is still in the LUKS header after remove")
     lab.poweroff()
     ser = lab.boot("after-remove")
     ser.expect(e2e.PASS_PROMPT, 240, fail_on=e2e.TPM_PROMPT)
@@ -196,6 +210,8 @@ def sc_rotate(lab):
     log(out)
     if "killing previous vault keyslot" not in out:
         raise Fail("rotation did not retire the previous keyslot")
+    if vault_tokens(ser) != "1":
+        raise Fail("expected exactly one tokenvault record in the LUKS header after rotation")
     lab.poweroff()
     sc_happy(lab)
 

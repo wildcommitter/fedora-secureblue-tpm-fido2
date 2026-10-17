@@ -28,7 +28,10 @@ usage: tokenvault <command>
               Active from the next boot; nothing else to install.
   verify      check the installed vault and keyslot, and that the TPM2 layer
               refuses to unseal from the booted system (PCR 11 sealed)
-  remove      kill the vault keyslot and delete the vault
+  remove [--keyslot N]
+              kill the vault keyslot and delete the vault. The keyslot comes
+              from the record in the LUKS header (or the state file);
+              --keyslot only when both are lost
   status      show configuration, enrollment and token state
 
 config: $CONF (override with TOKENVAULT_CONF=)
@@ -163,6 +166,45 @@ keyslot_count() {
     luks_json "$1" | python3 -Ic 'import json, sys; print(len(json.load(sys.stdin)["keyslots"]))'
 }
 
+# The vault's keyslot is recorded in the target's LUKS2 header as a token of
+# type "tokenvault" (no plugin handles it; nothing tries to unlock with it),
+# so the record travels with the disk and survives a lost $STATE.
+record_vault_slot() {
+    printf '{"type":"tokenvault","keyslots":["%s"],"vault":"%s"}' "$1" "$VAULT_FILE" \
+        | cryptsetup token import "$TARGET"
+}
+forget_vault_slot() {   # drop the header record(s) pointing at keyslot $1
+    local id
+    for id in $(luks_json "$TARGET" | python3 -Ic '
+import json, sys
+for i, t in json.load(sys.stdin)["tokens"].items():
+    if t["type"] == "tokenvault" and sys.argv[1] in t["keyslots"]:
+        print(i)' "$1"); do
+        cryptsetup token remove --token-id "$id" "$TARGET"
+    done
+}
+# Existing keyslots recorded as the vault's: header tokens, then $STATE.
+vault_slots() {
+    local s
+    for s in $({ luks_json "$TARGET" | python3 -Ic '
+import json, sys
+for t in json.load(sys.stdin)["tokens"].values():
+    if t["type"] == "tokenvault":
+        print("\n".join(t["keyslots"]))'; echo "${TARGET_KEYSLOT:-}"; } | sort -un); do
+        keyslot_exists "$TARGET" "$s" && echo "$s"
+    done
+    return 0
+}
+# Keyslots in tokenvault's own format (PBKDF2, 1000 iterations); a recovery
+# passphrase never uses that.
+lookalike_slots() {
+    luks_json "$TARGET" | python3 -Ic '
+import json, sys
+for k, v in json.load(sys.stdin)["keyslots"].items():
+    if v["kdf"]["type"] == "pbkdf2" and v["kdf"].get("iterations") == 1000:
+        print(k)'
+}
+
 
 # The ESP may be mounted read-only; open it for writing only around the swap.
 ESP_WAS_RO=
@@ -190,6 +232,7 @@ cleanup() {
     done
     if [[ -n $PENDING_SLOT ]]; then
         echo "tokenvault: rolling back keyslot $PENDING_SLOT of $TARGET" >&2
+        forget_vault_slot "$PENDING_SLOT" 2>/dev/null || true
         cryptsetup luksKillSlot --batch-mode "$TARGET" "$PENDING_SLOT" </dev/null || true
     fi
     if [[ -n $BUILD && -d $BUILD ]]; then
@@ -280,7 +323,7 @@ cmd_enroll() {
     load_state
     new_build_dir
     local fdev k1=$BUILD/k1 k2=$BUILD/k2 img=$BUILD/vault.img secret=$BUILD/secret
-    local outer=tv-build-$$-outer inner=tv-build-$$-inner slot old_slot=${TARGET_KEYSLOT:-}
+    local outer=tv-build-$$-outer inner=tv-build-$$-inner slot old_slots=() old
 
     say "target: $TARGET (UUID $TARGET_UUID); vault: $VAULT"
     fdev=$(fido2_device)
@@ -367,13 +410,17 @@ sys.stdout.write("".join(secrets.choice(alphabet) for _ in range(int(sys.argv[1]
     mv -f "$VAULT.new" "$VAULT"
     sync -f "$VAULT"
     esp_restore
+    mapfile -t old_slots < <(vault_slots)
+    record_vault_slot "$slot"
     write_state "$slot"
     PENDING_SLOT=
 
-    if [[ -n $old_slot && $old_slot != "$slot" ]] && keyslot_exists "$TARGET" "$old_slot"; then
-        say "killing previous vault keyslot $old_slot"
-        cryptsetup luksKillSlot --batch-mode "$TARGET" "$old_slot" </dev/null
-    fi
+    for old in "${old_slots[@]}"; do
+        [[ $old != "$slot" ]] && keyslot_exists "$TARGET" "$old" || continue
+        say "killing previous vault keyslot $old"
+        forget_vault_slot "$old"
+        cryptsetup luksKillSlot --batch-mode "$TARGET" "$old" </dev/null
+    done
     say "enrolled: vault keyslot $slot, active from the next boot; your existing passphrase still works as recovery"
 }
 
@@ -381,11 +428,19 @@ cmd_verify() {
     load_conf
     load_state
     new_build_dir
-    local ok=1
-    [[ -n $TARGET_KEYSLOT ]] || die "not enrolled"
+    local ok=1 slots=() recorded
+    mapfile -t slots < <(vault_slots)
+    recorded=$(luks_json "$TARGET" | python3 -Ic '
+import json, sys
+print(" ".join(k for t in json.load(sys.stdin)["tokens"].values() if t["type"] == "tokenvault" for k in t["keyslots"]))')
+    [[ ${#slots[@]} -gt 0 || -f $VAULT ]] || die "not enrolled"
     [[ -f $VAULT ]] && say "vault present: $VAULT" || { say "FAIL: vault $VAULT missing"; ok=0; }
-    keyslot_exists "$TARGET" "$TARGET_KEYSLOT" && say "root keyslot $TARGET_KEYSLOT present" \
-        || { say "FAIL: root keyslot $TARGET_KEYSLOT missing"; ok=0; }
+    if [[ ${#slots[@]} -eq 1 && $recorded == "${slots[0]}" ]]; then
+        say "root keyslot ${slots[0]} present, recorded in the LUKS header"
+    else
+        say "FAIL: vault keyslot(s) '${slots[*]}', recorded in the LUKS header: '$recorded'; expected exactly one, recorded (re-run tokenvault enroll)"
+        ok=0
+    fi
     if [[ -f $VAULT ]]; then
         local types
         types=$(luks_json "$VAULT" | python3 -Ic '
@@ -413,14 +468,27 @@ print(" ".join(t["type"] for t in json.load(sys.stdin)["tokens"].values()))')
 cmd_remove() {
     load_conf
     load_state
-    if [[ -n $TARGET_KEYSLOT ]] && keyslot_exists "$TARGET" "$TARGET_KEYSLOT"; then
-        [[ $(keyslot_count "$TARGET") -gt 1 ]] || die "keyslot $TARGET_KEYSLOT is the only one left; not killing it"
-        cryptsetup luksKillSlot --batch-mode "$TARGET" "$TARGET_KEYSLOT" </dev/null
-        say "killed vault keyslot $TARGET_KEYSLOT"
+    local slots=() s
+    case ${1:-} in
+        --keyslot) [[ ${2:-} =~ ^[0-9]+$ ]] || die "--keyslot needs a keyslot number"; slots=("$2") ;;
+        "") mapfile -t slots < <(vault_slots) ;;
+        *) die "remove: unknown option $1" ;;
+    esac
+    if [[ ${#slots[@]} -eq 0 ]]; then
+        mapfile -t slots < <(lookalike_slots)
+        [[ ${#slots[@]} -eq 0 ]] || die "no record of the vault keyslot (no tokenvault token in the LUKS header of $TARGET, no $STATE), but keyslot(s) ${slots[*]} use tokenvault's format (PBKDF2, 1000 iterations) and may still unlock root. If one is the vault's, run: tokenvault remove --keyslot N"
     fi
+    for s in "${slots[@]}"; do
+        keyslot_exists "$TARGET" "$s" || die "keyslot $s does not exist on $TARGET"
+        [[ $(keyslot_count "$TARGET") -gt 1 ]] || die "keyslot $s is the only one left; not killing it"
+        forget_vault_slot "$s"
+        cryptsetup luksKillSlot --batch-mode "$TARGET" "$s" </dev/null
+        say "killed vault keyslot $s"
+    done
     esp_rw
     rm -f "$VAULT"
     rmdir "$(dirname "$VAULT")" 2>/dev/null || true
+    sync -f "$ESP"   # FAT: don't leave the deletion in the page cache
     esp_restore
     rm -f "$STATE"
     say "removed; the next boot asks for the root passphrase"
@@ -432,7 +500,7 @@ cmd_status() {
     new_build_dir
     echo "target:        $TARGET (UUID $TARGET_UUID) -> /dev/mapper/root"
     echo "vault:         $VAULT $([[ -f $VAULT ]] && echo present || echo MISSING)"
-    echo "keyslot:       ${TARGET_KEYSLOT:-none} $([[ -n $TARGET_KEYSLOT ]] && keyslot_exists "$TARGET" "$TARGET_KEYSLOT" && echo '(present)')"
+    echo "keyslot:       $(vault_slots | tr '\n' ' ' | sed 's/ $//;s/^$/none/')"
     echo "initrd module: $(initrd_has_module 2>/dev/null && echo present || echo MISSING)"
     local pk
     pk=$(pcr_key_state)
@@ -458,7 +526,7 @@ cmd_status() {
 case "${1:-}" in
     enroll) cmd_enroll ;;
     verify) cmd_verify ;;
-    remove) cmd_remove ;;
+    remove) shift; cmd_remove "$@" ;;
     status) cmd_status ;;
     -h|--help|help|"") usage ;;
     *) usage >&2; exit 2 ;;
