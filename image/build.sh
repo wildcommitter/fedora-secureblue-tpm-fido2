@@ -32,7 +32,7 @@ rm -rf out
 trap 'rm -rf out' EXIT
 
 set -x
-podman build -t "${p}-rootfs" -f Containerfile .
+podman build -t "${p}-rootfs" -f Containerfile --build-context lockscreen=../lockscreen .
 podman build -t "${p}-kernel" -f uki/Containerfile.kernel --build-arg "BASE=${p}-rootfs" .
 podman build -t "${p}-systemd-boot" -f uki/Containerfile.systemd-boot \
     --build-arg "RELEASE=${release}" "${sign[@]}" .

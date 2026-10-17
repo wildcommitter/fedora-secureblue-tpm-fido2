@@ -3,4 +3,6 @@
 export WLR_BACKENDS=headless
 export WLR_RENDERER=pixman
 export WLR_LIBINPUT_NO_DEVICES=1
+# No idle lock here: unlocking needs a touch on the key, which a remote user can't give.
+export SCROLL_SECURE_HEADLESS=1
 exec /usr/bin/scroll -c /etc/scroll/headless.conf

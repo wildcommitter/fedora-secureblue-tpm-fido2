@@ -55,7 +55,9 @@ has `swayidle` and `pam-u2f` already. `gtk4-layer-shell` must be added. The olde
 | `etc/pam.d/hardened-unlock` | `/etc/pam.d/hardened-unlock` |
 | `etc/scroll/config.d/50-hardened-unlock.conf` | `/etc/scroll/config.d/` (needs the `include /etc/scroll/config.d/*` line in `/etc/scroll/config` enabled) |
 
-The drop-in locks with **Mod+Alt+L**, after 5 minutes idle, and before suspend.
+The drop-in locks with **Mod+Alt+L**, after 5 minutes idle, and before suspend. The
+headless VNC session (`scroll-headless`, which sets `SCROLL_SECURE_HEADLESS=1`) gets the
+keybind only, with no idle lock, because a remote user can't touch the key.
 `hardened-unlock -f` returns once the session is locked (like `swaylock -f`). That's what
 `swayidle -w ... before-sleep` needs: the machine suspends only after the lock is in place.
 

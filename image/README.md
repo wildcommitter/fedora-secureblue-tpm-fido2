@@ -31,6 +31,7 @@ AMD R9700 on amdgpu.
 | `uki/keys/` | Public keys only (PK/KEK/db certs, `.auth`, `.esl`, PCR.pem, GUID). Built into the image at `/usr/share/secureblue/uki/keys/` |
 | `files/usr/libexec/scroll-secure/enroll-secure-boot-keys` | Firmware enrollment with option ROM hashes. Use this, **not** `ujust enroll-secure-boot-keys` |
 | `files/etc/pam.d/swaylock` | Unlock = FIDO2 key + client PIN + touch, mapping file in `/etc` |
+| `../lockscreen/` (build context `lockscreen`) | hardened-unlock, a GTK4 ext-session-lock locker. Unlock = FIDO2 key + PIN + touch, **then** the account password. Bound to Mod+Alt+L, 5 min idle and suspend via `/etc/scroll/config.d/50-hardened-unlock.conf` |
 | `files/usr/share/wayland-sessions/scroll-pixman.desktop` | SDDM session: scroll with `WLR_RENDERER=pixman` |
 | `files/usr/libexec/scroll-headless`, `files/etc/scroll/headless.conf` | Headless pixman session, wayvnc on `127.0.0.1:5900` |
 | `files/usr/lib/systemd/user/scroll-headless.service` | Starts it as a user service (off by default) |
@@ -172,7 +173,8 @@ Microsoft-signed binaries, and our db trusts none.
 ## After the first boot
 
 ```sh
-# Lock-screen key. Register only the real key: unplug or stop any virtual test key first.
+# Lock-screen key (one registration serves hardened-unlock and swaylock).
+# Register only the real key: unplug or stop any virtual test key first.
 pamu2fcfg -u "$USER" -o pam://workstation -i pam://workstation -N | run0 tee /etc/u2f_mappings
 run0 chmod 0644 /etc/u2f_mappings
 
@@ -186,6 +188,10 @@ run0 usermod -aG libvirt "$USER"
 systemctl --user enable --now scroll-headless.service
 # client: ssh -L 5900:127.0.0.1:5900 host, then a VNC viewer to localhost:5900
 ```
+
+The default lock (Mod+Alt+L, idle, suspend) is hardened-unlock: key PIN + touch, then
+your password, each asked separately. swaylock stays installed (key only) but isn't bound.
+The headless VNC session doesn't idle-lock, because nobody remote can touch the key.
 
 Test the lock screen from a second logged-in TTY before relying on it. TTY and SDDM logins
 keep the stock authselect stack, so they still work if the key is lost.
@@ -205,7 +211,8 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
 
 ## Checks in the build
 
-- The rootfs fails if scroll misses a library or a tokenvault CLI dependency is missing.
+- The rootfs fails if scroll or hardened-unlock misses a library, the config.d include
+  isn't enabled, or a tokenvault CLI dependency is missing.
 - `uki/Containerfile.base` runs `bootc container lint --fatal-warnings`.
 - `build.sh` finally runs `tokenvault/check-uki` on the signed UKI: sections, PCR
   signature, and the initrd's tokenvault files, binaries, dracut modules and kmods.
