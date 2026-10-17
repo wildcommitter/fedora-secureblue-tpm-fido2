@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""tokenvault end-to-end test under KVM.
+"""Shared KVM harness for the tokenvault e2e (test/bootc/e2e.py).
 
-Boots the legacy CachyOS guest built by legacy/cachyos-tokenvault/test/vm/build-guest.sh
-(the classes and shared scenarios are also used by test/bootc/e2e.py) with:
-  * an emulated TPM2 (swtpm, TPM-CRB like the host) measured by stock OVMF,
-    so the PCR 7 policy is real -- the host TPM is never touched;
-  * a virtual FIDO2 key (test/vfido) on a dummy_hcd USB gadget, passed in
-    with QEMU usb-host -- the host's real key is never touched;
-  * the serial console for prompts/commands and the monitor for keystrokes
-    and screendumps (plymouth runs).
+  * Lab: a QEMU guest with OVMF, an emulated TPM2 (swtpm, TPM-CRB) and the
+    virtual FIDO2 key (test/vfido) on a dummy_hcd USB gadget, passed in with
+    QEMU usb-host -- the host's TPM and real key are never touched;
+  * Serial: the serial console for prompts and commands; the QEMU monitor
+    for keystrokes and screendumps;
+  * scenarios shared by the harnesses (wrong PINs, no touch, no key,
+    foreign TPM). The caller sets the prompt regexes for its guest.
 
-  sudo -v && test/e2e.py [--work legacy/cachyos-tokenvault/test/vm/work] [scenario ...]
-
-Scenarios run in order; "all" is the default. Artifacts (serial logs,
-vfido log, screenshots) land in <work>/artifacts/.
+Artifacts (serial logs, vfido log, screenshots) land in <work>/artifacts/.
 """
-import argparse
 import os
 import re
 import shutil
@@ -37,7 +32,6 @@ SHELL_PROMPT = r"root@tokenvault-lab[^\n]*# "
 TPM_PROMPT = r"Please enter TPM2 PIN"
 FIDO_PROMPT = r"Please enter security token PIN"
 PASS_PROMPT = r"Please enter passphrase for disk [^\n]*luks-"
-VAULT_PASS_PROMPT = r"Please enter passphrase for disk [^\n]*tokenvault"
 
 
 class Fail(Exception):
@@ -228,7 +222,6 @@ class Lab:
                "-vga", "std", "-display", "none",
                "-serial", f"unix:{ser_path},server=on,wait=off",
                "-monitor", f"unix:{self.mon_path},server=on,wait=off",
-               "-virtfs", f"local,path={ROOT},mount_tag=proj,security_model=none,readonly=on",
                "-no-reboot"]
         if fido:
             cmd += ["-device", f"usb-host,bus=xhci.0,vendorid={VID},productid={PID}"]
@@ -321,74 +314,6 @@ def vfido_count(text, what):
     return len(re.findall(r"EVENT " + what, text))
 
 
-def sc_setup(lab):
-    """Baseline boot (recovery passphrase via plymouth), enroll + install in the guest."""
-    ser = lab.boot("setup")
-    # quiet splash: plymouth owns the prompt; type on the VGA keyboard.
-    time.sleep(12)
-    shot = lab.screenshot("plymouth-recovery-prompt")
-    log(f"screenshot {shot}")
-    lab.sendkeys(lab.env["LAB_RECOVERY"] + "\n")
-    lab.wait_shell(240)
-    ser.check("mkdir -p /mnt/proj && mount -t 9p -o trans=virtio,version=9p2000.L,ro proj /mnt/proj && "
-              "rm -rf /root/tokenvault && mkdir /root/tokenvault && "
-              "tar -C /mnt/proj/legacy/cachyos-tokenvault --exclude=./test/vm/work -cf - . | tar -C /root/tokenvault -xf -")
-    conf = f"""TARGET_DEVICE="UUID={lab.env['GUEST_LUKS_UUID']}"
-TARGET_NAME="{lab.env['GUEST_TARGET_NAME']}"
-TARGET_PASSPHRASE="{lab.env['LAB_RECOVERY']}"
-TPM2_PIN="{TPM2_PIN}"
-FIDO2_PIN="{FIDO2_PIN}"
-TPM2_PCRS="7"
-TOKEN_TIMEOUT="20s"
-KEYFILE_TIMEOUT="90s"
-"""
-    ser.check("install -d -m 700 /etc/tokenvault && "
-              "sed -e '/^TARGET_\\|^TPM2_PIN\\|^FIDO2_PIN\\|^TPM2_PCRS\\|^TOKEN_TIMEOUT\\|^KEYFILE_TIMEOUT/d' "
-              "/root/tokenvault/tokenvault.conf.example > /etc/tokenvault/tokenvault.conf && chmod 600 /etc/tokenvault/tokenvault.conf")
-    for line in conf.strip().splitlines():
-        ser.check(f"printf '%s\\n' '{line}' >> /etc/tokenvault/tokenvault.conf")
-    vmark = lab.vfido_mark()
-    out = ser.check("/root/tokenvault/tokenvault enroll 2>&1 | grep -v WARNING", 600)
-    log("enroll output:\n" + out[-2500:])
-    if "enrolled: vault keyslot" not in out:
-        raise Fail("enroll did not finish")
-    ev = lab.vfido_events(vmark)
-    if vfido_count(ev, "pin=set") != 1 or vfido_count(ev, "up=granted") < 3:
-        raise Fail(f"unexpected key activity during enroll:\n{ev}")
-    out = ser.check("/root/tokenvault/tokenvault install 2>&1 | tail -15", 600)
-    log("install output:\n" + out[-1500:])
-    if "initramfs check passed" not in out:
-        raise Fail("initramfs self-check did not pass")
-    log("status:\n" + ser.check("tokenvault status"))
-    # automated boots use the serial console for prompts (no plymouth)
-    set_mode(ser, "serial")
-    lab.poweroff()
-
-
-def set_mode(ser, mode):
-    """Switch the guest's Limine cmdline (via /etc/default/limine + limine-update)."""
-    a, b = '"quiet nowatchdog splash ', '"nowatchdog plymouth.enable=0 '
-    if mode != "serial":
-        a, b = b, a
-    ser.check(f"sed -i 's/{a}/{b}/' /etc/default/limine && limine-update >/dev/null 2>&1 && "
-              f"grep -qF '{b[1:].strip()}' /boot/limine.conf")
-
-
-def sc_happy(lab):
-    """TPM2 PIN + FIDO2 PIN + one touch -> root unlocked without passphrase."""
-    vmark = lab.vfido_mark()
-    ser = lab.boot("happy")
-    mark = ser.mark()
-    unlock_with_tokens(lab, ser)
-    lab.wait_shell()
-    j = assert_clean_after_boot(ser, mark)
-    n = touches(lab, vmark)
-    if n != 1:
-        raise Fail(f"expected exactly 1 touch during unlock, got {n}")
-    log("journal excerpt:\n" + j[-1500:])
-    lab.poweroff()
-
-
 def sc_wrong_tpm_pin(lab):
     """A wrong TPM2 PIN is re-asked; the right one then unlocks."""
     ser = lab.boot("wrong-tpm-pin")
@@ -468,103 +393,3 @@ def sc_foreign_tpm(lab):
         ser.pos -= len(m.group(0))
     expect_fallback(lab, ser, "foreign TPM")
     lab.poweroff()
-
-
-def sc_splash(lab):
-    """Exactly the host's 'quiet splash' boot: PINs typed into plymouth."""
-    ser = lab.boot("splash-switch")
-    unlock_with_tokens(lab, ser)
-    lab.wait_shell()
-    set_mode(ser, "splash")
-    lab.poweroff()
-
-    vmark = lab.vfido_mark()
-    ser = lab.boot("splash")
-    time.sleep(15)
-    log(f"screenshot {lab.screenshot('plymouth-tpm2-pin')}")
-    lab.sendkeys(TPM2_PIN + "\n")
-    time.sleep(8)
-    log(f"screenshot {lab.screenshot('plymouth-fido2-pin')}")
-    lab.sendkeys(FIDO2_PIN + "\n")
-    lab.wait_shell(240)
-    if touches(lab, vmark) != 1:
-        raise Fail("expected one touch in splash boot")
-    out = ser.check("journalctl -b -o cat --no-pager | grep -ciE 'Please enter passphrase for disk' || true")
-    if out.strip().splitlines()[-1].strip() not in ("0", ""):
-        raise Fail("passphrase was asked in splash boot")
-    set_mode(ser, "serial")
-    lab.poweroff()
-
-
-def sc_rotate(lab):
-    """Re-enroll (rotate) inside the guest, then boot with tokens again."""
-    ser = lab.boot("rotate")
-    unlock_with_tokens(lab, ser)
-    lab.wait_shell()
-    out = ser.check("tokenvault enroll 2>&1 | grep -E 'keyslot|error'", 600)
-    log(out)
-    if "killing previous vault keyslot" not in out:
-        raise Fail("rotation did not retire the previous keyslot")
-    ser.check("tokenvault verify 2>&1 | tail -1", 300)
-    lab.poweroff()
-    sc_happy(lab)
-
-
-def sc_uninstall(lab):
-    """uninstall --purge: keyslot killed, vault gone, plain passphrase boot."""
-    ser = lab.boot("uninstall")
-    unlock_with_tokens(lab, ser)
-    lab.wait_shell()
-    ser.check("tokenvault uninstall --purge 2>&1 | tail -3", 600)
-    out = ser.check(f"cryptsetup luksDump /dev/disk/by-uuid/{lab.env['GUEST_LUKS_UUID']} | grep -cE '^  [0-9]+: luks2'")
-    if out.strip().splitlines()[-1].strip() != "1":
-        raise Fail(f"expected only the recovery keyslot left, got:\n{out}")
-    lab.poweroff()
-    ser = lab.boot("after-uninstall")
-    ser.expect(PASS_PROMPT, 180, fail_on=TPM_PROMPT)
-    ser.send(lab.env["LAB_RECOVERY"])
-    lab.wait_shell()
-    lab.poweroff()
-
-
-SCENARIOS = [
-    ("setup", sc_setup), ("happy", sc_happy), ("wrong-tpm-pin", sc_wrong_tpm_pin),
-    ("wrong-fido-pin", sc_wrong_fido_pin), ("no-touch", sc_no_touch), ("no-key", sc_no_key),
-    ("foreign-tpm", sc_foreign_tpm), ("splash", sc_splash), ("rotate", sc_rotate),
-    ("uninstall", sc_uninstall),
-]
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--work", default=os.path.join(ROOT, "legacy/cachyos-tokenvault/test/vm/work"))
-    ap.add_argument("scenarios", nargs="*", default=["all"])
-    a = ap.parse_args()
-    names = [n for n, _ in SCENARIOS] if a.scenarios == ["all"] else a.scenarios
-    lab = Lab(a.work)
-    lab.fido_up()
-    results = []
-    try:
-        for name in names:
-            fn = dict(SCENARIOS)[name]
-            t0 = time.time()
-            try:
-                fn(lab)
-                results.append((name, "PASS", time.time() - t0, ""))
-                log(f"PASS {name}")
-            except Fail as e:
-                results.append((name, "FAIL", time.time() - t0, str(e)))
-                log(f"FAIL {name}: {e}")
-                lab.kill()
-                break
-    finally:
-        lab.kill()
-        lab.fido_down()
-    print("\n==== tokenvault e2e results ====")
-    for n, r, t, _ in results:
-        print(f"  {r}  {n:16s} {t:6.0f}s")
-    return 0 if results and all(r == "PASS" for _, r, _, _ in results) and len(results) == len(names) else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
