@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Build the sealed scroll-secure image locally, mirroring secureblue's
+# build-sealed-image workflow with our own keys:
+#
+#   rootfs (Containerfile) -> kernel -> signed systemd-boot -> signed UKI addons
+#   -> base (prepared, linted, rechunked) -> UKI (signed, composefs-sealed)
+#
+#   SECRETS_DIR=... ./build.sh [tag]          # default tag: localhost/scroll-secure:uki
+#
+# Needs: uki/keys/ from uki/create-keys.sh, and db.key + PCR.key in $SECRETS_DIR.
+# Only those two private keys are mounted into the build, as podman secrets;
+# PK.key and KEK.key are never used here.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+tag="${1:-localhost/scroll-secure:uki}"
+secrets="${SECRETS_DIR:-${HOME}/.local/share/scroll-secure/secrets}"
+release=$(sed -n 's/^ARG FEDORA_VERSION=//p' Containerfile)
+p=localhost/scroll-secure
+
+for f in uki/keys/db/db.pem uki/keys/PCR/PCR.pem "${secrets}/db.key" "${secrets}/PCR.key"; do
+    [[ -r "${f}" ]] || { echo "missing ${f}; run uki/create-keys.sh first" >&2; exit 1; }
+done
+sign=(
+    --secret "id=secureboot_key,src=${secrets}/db.key"
+    --secret "id=secureboot_crt,src=uki/keys/db/db.pem"
+    --secret "id=pcr_key,src=${secrets}/PCR.key"
+)
+
+# chunkah writes its OCI layout into the context (./out); start clean.
+rm -rf out
+trap 'rm -rf out' EXIT
+
+set -x
+podman build -t "${p}-rootfs" -f Containerfile .
+podman build -t "${p}-kernel" -f uki/Containerfile.kernel --build-arg "BASE=${p}-rootfs" .
+podman build -t "${p}-systemd-boot" -f uki/Containerfile.systemd-boot \
+    --build-arg "RELEASE=${release}" "${sign[@]}" .
+podman build -t "${p}-uki-addons" -f uki/Containerfile.addons \
+    --build-arg "RELEASE=${release}" "${sign[@]}" .
+podman build -t "${p}-base" -f uki/Containerfile.base \
+    --build-arg "BASE=${p}-rootfs" \
+    --build-arg "SYSTEMDBOOT=${p}-systemd-boot" \
+    --build-arg "UKIADDONS=${p}-uki-addons" \
+    --skip-unused-stages=false --security-opt=label=disable \
+    --volume "${PWD}:/run/src" .
+podman build -t "${tag}" -f uki/Containerfile.uki \
+    --build-arg "BASE=${p}-base" \
+    --build-arg "KERNEL=${p}-kernel" \
+    --build-arg "RELEASE=${release}" "${sign[@]}" .
+
+# The signed UKI must carry the tokenvault initrd pieces and the PCR signature.
+podman run --rm --tmpfs /t "${tag}" \
+    sh -c 'exec /usr/libexec/tokenvault/check-uki --tmpdir /t /boot/EFI/Linux/*.efi'
+set +x
+
+echo "Built ${tag}. Sign before pushing: cosign sign --key cosign.key <registry ref>"

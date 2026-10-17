@@ -1,0 +1,67 @@
+#!/usr/bin/bash
+# Checks that a signed UKI carries everything tokenvault needs at boot.
+# Used by the image build (after the UKI stage) and by `tokenvault verify`.
+#
+#   check-uki [--tmpdir DIR] <uki.efi>...
+#
+# The .initrd section is ~240 MB, so it is extracted into DIR (default
+# $TMPDIR or /var/tmp), never into a small tmpfs like /run.
+set -euo pipefail
+
+tmpdir=${TMPDIR:-/var/tmp}
+if [[ ${1:-} == --tmpdir ]]; then
+    tmpdir=$2
+    shift 2
+fi
+[[ $# -ge 1 ]] || { echo "usage: check-uki [--tmpdir DIR] <uki.efi>..." >&2; exit 2; }
+
+# paths inside the initrd as extended regexes (lsinitrd listing, no leading slash)
+need_files=(
+    usr/lib/systemd/system-generators/tokenvault-generator
+    usr/lib/systemd/systemd-cryptsetup
+    usr/lib/systemd/systemd-pcrextend
+    usr/lib/systemd/system-generators/systemd-gpt-auto-generator
+    'usr/lib(64)?/cryptsetup/libcryptsetup-token-systemd-fido2.so'
+    'usr/lib(64)?/cryptsetup/libcryptsetup-token-systemd-tpm2.so'
+)
+need_bins=(keyctl umount tail tr dd sh systemctl)
+need_dracut_modules=(tokenvault systemd-cryptsetup crypt fido2 tpm2-tss systemd-pcrphase)
+need_kmods=(dm-crypt loop vfat serpent_generic xts)   # .ko in the initrd or built in
+
+rc=0
+fail() { echo "check-uki: $uki: $*" >&2; rc=1; }
+
+for uki in "$@"; do
+    sections=$(objdump -h "$uki" 2>/dev/null | awk '{print $2}')
+    for sec in .linux .initrd .cmdline .pcrsig .pcrpkey; do
+        grep -qx -- "$sec" <<<"$sections" || fail "section $sec missing"
+    done
+    cmdline=$(objcopy -O binary --only-section=.cmdline "$uki" /dev/stdout 2>/dev/null | tr -d '\000')
+    [[ " $cmdline " != *" rd.tokenvault=0 "* ]] || fail "cmdline disables tokenvault (rd.tokenvault=0)"
+
+    initrd=$(mktemp "$tmpdir/check-uki.XXXXXX")
+    trap 'rm -f "$initrd"' EXIT
+    objcopy -O binary --only-section=.initrd "$uki" "$initrd"
+    listing=$(lsinitrd "$initrd" 2>/dev/null)
+    builtin=$(lsinitrd -f "$(grep -oE 'usr/lib/modules/[^/ ]+/modules\.builtin$' <<<"$listing" | head -1)" "$initrd" 2>/dev/null || true)
+    modules=" $(lsinitrd -m "$initrd" 2>/dev/null | sed -n '/^dracut modules:/,/^=/p' | tr -s ' \n' ' ') "
+    rm -f "$initrd"
+    trap - EXIT
+
+    for f in "${need_files[@]}"; do
+        grep -qE "[[:space:]]$f( |$)" <<<"$listing" || fail "initrd lacks /$f"
+    done
+    for b in "${need_bins[@]}"; do
+        grep -qE "[[:space:]]usr/s?bin/$b( |$)" <<<"$listing" || fail "initrd lacks $b"
+    done
+    for m in "${need_dracut_modules[@]}"; do
+        [[ $modules == *" $m "* ]] || fail "dracut module $m not in initrd"
+    done
+    for k in "${need_kmods[@]}"; do
+        re="/${k//[-_]/[-_]}\.ko(\.[a-z]+)?$"
+        grep -qE "$re" <<<"$listing" || grep -qE "$re" <<<"$builtin" \
+            || fail "kernel module $k neither in initrd nor built in"
+    done
+    [[ $rc -eq 0 ]] && echo "check-uki: $uki: OK"
+done
+exit $rc

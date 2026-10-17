@@ -1,0 +1,93 @@
+# Root filesystem of the workstation image: secureblue Sericea (hardened Fedora
+# Atomic Sway) + dawsers/scroll, KVM/libvirt, FIDO2 lock screen, software-rendered
+# headless session over VNC.
+#
+# This is only the first stage. ./build.sh feeds it through uki/ to produce the
+# sealed image: composefs backend, systemd-boot + UKI signed with our own db key,
+# signed PCR 11 policy. The kernel and initramfs here are replaced there.
+#
+# Base and scroll are pinned; bump both deliberately (see README.md).
+
+ARG FEDORA_VERSION=44
+ARG BASE_IMAGE=ghcr.io/secureblue/sericea-main-hardened
+# 44.20261016.0, kernel 7.2.10-200.fc44 (multi-arch index digest)
+ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a32c48ebf
+
+# ---------------------------------------------------------------------------
+# Stage 1: build scroll. Its patched wlroots is an in-tree subproject and is
+# linked statically, so only scroll's own files reach the final image.
+# ---------------------------------------------------------------------------
+FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
+
+ARG SCROLL_REF=1.12.21
+ARG SCROLL_COMMIT=f80c5820c0eebaad586f0008faecfe3ae62c307a
+
+RUN dnf -y install git meson ninja-build gcc lua-devel readline-devel scdoc 'dnf5-command(builddep)' \
+ && dnf -y builddep wlroots sway \
+ && dnf clean all
+
+RUN git clone --depth 1 --branch "${SCROLL_REF}" https://github.com/dawsers/scroll /src \
+ && test "$(git -C /src rev-parse HEAD)" = "${SCROLL_COMMIT}"
+
+RUN meson setup /build /src \
+      --prefix=/usr --sysconfdir=/etc --buildtype=release \
+      -Db_ndebug=true -Dwerror=false -Ddefault-wallpaper=false \
+      -Dwlroots:default_library=static -Dwlroots:examples=false \
+ && meson compile -C /build \
+ && DESTDIR=/out meson install -C /build --skip-subprojects
+
+# ---------------------------------------------------------------------------
+# Stage 2: the bootable image.
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE}@${BASE_DIGEST}
+
+COPY --from=scroll-build /out/ /
+
+# - lua-libs: scroll's runtime Lua; the rest of its wlroots deps come with sway in the base.
+# - libvirt modular daemons + swtpm/OVMF: VMs with vTPM and Secure Boot (also the
+#   tokenvault e2e lab).
+# - pam-u2f/pamu2fcfg/fido2-tools/tpm2-tools: lock screen + LUKS token enrollment.
+# /var is a tmpfs here so nothing lands in the image's /var (bootc lint);
+# the libvirt state dirs come back via files/usr/lib/tmpfiles.d/.
+RUN --mount=type=tmpfs,target=/var \
+    dnf -y install \
+      lua-libs \
+      libvirt-daemon-kvm libvirt-daemon-config-network qemu-kvm \
+      virt-manager virt-install swtpm swtpm-tools edk2-ovmf \
+      pam-u2f pamu2fcfg fido2-tools tpm2-tools \
+      wayvnc swaylock swayidle \
+ && dnf clean all
+
+# Fail the build if the static-wlroots assumption broke and scroll needs a lib we lack.
+RUN if ldd /usr/bin/scroll | grep -q 'not found'; then ldd /usr/bin/scroll; exit 1; fi
+
+RUN systemctl enable \
+      virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+      virtnodedevd.socket virtsecretd.socket virtlogd.socket
+
+COPY files/ /
+
+# tokenvault: TPM2+FIDO2 LUKS unlock (see LUKS.md)
+# The initramfs is rebuilt from the dracut config in uki/Containerfile.uki;
+# build.sh checks the result with check-uki.
+COPY files-luks/ /
+
+# Fail the build if a tool the tokenvault CLI needs on the booted system is gone.
+RUN for b in bash cryptsetup systemd-cryptenroll /usr/lib/systemd/systemd-cryptsetup \
+             /usr/lib/systemd/systemd-pcrextend udevadm python3 findfs blkid findmnt \
+             mountpoint shred awk openssl objdump objcopy lsinitrd keyctl; do \
+        command -v "$b" > /dev/null || { echo "tokenvault dep missing: $b"; exit 1; }; \
+    done \
+ && python3 -c 'import fido2'
+
+# tokenvault_conf_t: /etc/tokenvault (plaintext token PINs) as a security file
+# type like shadow_t, out of reach of confined domains' etc_t read rules.
+RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
+ && semodule -l | grep -qx tokenvault
+
+RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/enroll-secure-boot-keys \
+ && bootc container lint
+
+LABEL org.opencontainers.image.title="scroll-secure" \
+      org.opencontainers.image.description="secureblue Sericea + scroll, KVM, FIDO2 lock screen" \
+      containers.bootc="1"

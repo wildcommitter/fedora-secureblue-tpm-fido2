@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+# tokenvault: unlock a LUKS2 volume at boot from a vault on the ESP that
+# opens only with TPM2+PIN *and* FIDO2+PIN+touch. See README.md.
+set -euo pipefail
+umask 077
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+LIBDIR=$(dirname "$SELF")
+CONF=${TOKENVAULT_CONF:-/etc/tokenvault/tokenvault.conf}
+STATE_DIR=/etc/tokenvault
+STATE=$STATE_DIR/state            # non-secret; sourced by the initcpio hook
+PREFIX=/usr/local/lib/tokenvault
+HOOK_DST=/etc/initcpio/install/tokenvault
+DROPIN=/etc/mkinitcpio.conf.d/tokenvault.conf
+SCD=/usr/lib/systemd/systemd-cryptsetup
+
+die() { echo "tokenvault: error: $*" >&2; exit 1; }
+say() { echo "tokenvault: $*" >&2; }
+
+usage() {
+    cat <<EOF
+usage: tokenvault <command>
+
+  enroll      bake PINs into the tokens, build the vault on the ESP, add the
+              vault's passphrase as a keyslot of the target (re-run = rotate)
+  verify      open the installed vault exactly like the boot does (PINs from
+              the config, FIDO2 touch needed) and test it against the target
+  install     install the mkinitcpio hook and rebuild the initramfs
+  uninstall   remove the hook and rebuild (add --purge to also kill the
+              vault keyslot and delete the vault)
+  status      show configuration, enrollment and token state
+
+config: $CONF (override with TOKENVAULT_CONF=)
+EOF
+}
+
+# ---------------------------------------------------------------- helpers
+
+load_conf() {
+    [[ $EUID -eq 0 ]] || die "must run as root"
+    [[ -r $CONF ]] || die "config $CONF missing (start from tokenvault.conf.example)"
+    local owner mode
+    read -r owner mode < <(stat -c '%u %a' "$CONF")
+    [[ $owner == 0 && $mode == 600 ]] || die "$CONF holds plaintext PINs: must be root-owned, mode 600"
+    # shellcheck source=/dev/null
+    source "$CONF"
+    : "${TARGET_DEVICE:?} ${TARGET_NAME:?} ${ESP:?} ${VAULT_FILE:?}"
+    : "${TPM2_DEVICE:=auto} ${TPM2_PCRS=7} ${TPM2_ARGON2ID_MEMORY:=256M} ${TPM2_ARGON2ID_PARALLELISM:=4}"
+    : "${FIDO2_DEVICE:=auto}"
+    : "${OUTER_CIPHER:=aes-xts-plain64} ${INNER_CIPHER:=serpent-xts-plain64}"
+    : "${VAULT_KEY_SIZE:=512} ${VAULT_HASH:=sha512} ${SECRET_LENGTH:=64}"
+    : "${TOKEN_TIMEOUT:=60s} ${KEYFILE_TIMEOUT:=300s} ${TARGET_OPTIONS:=} ${TARGET_PASSPHRASE:=}"
+    : "${FIDO2_CURRENT_PIN:=}"
+    [[ ${#TPM2_PIN} -ge 4 ]] || die "TPM2_PIN must be at least 4 characters"
+    [[ ${#FIDO2_PIN} -ge 4 ]] || die "FIDO2_PIN must be at least 4 characters"
+    [[ $TPM2_PIN != "$FIDO2_PIN" ]] || die "TPM2_PIN and FIDO2_PIN must differ"
+    [[ $SECRET_LENGTH =~ ^[0-9]+$ && $SECRET_LENGTH -ge 43 ]] \
+        || die "SECRET_LENGTH must be >= 43 (256 bits)"
+    TARGET=$(findfs "$TARGET_DEVICE" 2>/dev/null || readlink -f "$TARGET_DEVICE")
+    [[ -b $TARGET ]] || die "target $TARGET_DEVICE not found"
+    cryptsetup isLuks --type luks2 "$TARGET" || die "$TARGET is not LUKS2"
+    TARGET_UUID=$(cryptsetup luksUUID "$TARGET")
+    mountpoint -q "$ESP" || die "ESP $ESP is not mounted"
+    [[ $(findmnt -no FSTYPE "$ESP") == vfat ]] || die "$ESP is not a FAT ESP"
+    ESP_PARTUUID=$(blkid -s PARTUUID -o value "$(findmnt -no SOURCE "$ESP")")
+    [[ -n $ESP_PARTUUID ]] || die "cannot determine PARTUUID of $ESP"
+    VAULT="$ESP/$VAULT_FILE"
+}
+
+load_state() {
+    TARGET_KEYSLOT=
+    # shellcheck source=/dev/null
+    [[ -r $STATE ]] && source "$STATE"
+    return 0
+}
+
+write_state() {
+    local tmp=$STATE.new
+    install -d -m 700 "$STATE_DIR"
+    cat > "$tmp" <<EOF
+# written by tokenvault enroll on $(date -Is); no secrets in here
+TARGET_UUID=$TARGET_UUID
+TARGET_NAME=$(printf %q "$TARGET_NAME")
+TARGET_OPTIONS=$(printf %q "$TARGET_OPTIONS")
+TARGET_KEYSLOT=$1
+ESP_PARTUUID=$ESP_PARTUUID
+VAULT_FILE=$(printf %q "$VAULT_FILE")
+SECRET_LENGTH=$SECRET_LENGTH
+TOKEN_TIMEOUT=$TOKEN_TIMEOUT
+KEYFILE_TIMEOUT=$KEYFILE_TIMEOUT
+EOF
+    chmod 600 "$tmp"
+    mv "$tmp" "$STATE"
+}
+
+fido2_device() {
+    if [[ $FIDO2_DEVICE != auto ]]; then
+        echo "$FIDO2_DEVICE"
+        return
+    fi
+    local devs
+    mapfile -t devs < <(systemd-cryptenroll --fido2-device=list 2>/dev/null | awk '$1 ~ /^\/dev\/hidraw/ {print $1}')
+    [[ ${#devs[@]} -eq 1 ]] || die "FIDO2_DEVICE=auto needs exactly one key plugged in (found ${#devs[@]}); set FIDO2_DEVICE"
+    echo "${devs[0]}"
+}
+
+# Run a command, answering its ask-password prompts with the configured PINs.
+# Same environment as the initramfs units (see initcpio/tokenvault).
+with_pins() {
+    SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE=0 TV_TPM2_PIN=$TPM2_PIN TV_FIDO2_PIN=$FIDO2_PIN python3 -I "$LIBDIR/lib/askpass.py" \
+        --map '(?i)tpm2.*pin=TV_TPM2_PIN' \
+        --map '(?i)(security token|fido2).*pin=TV_FIDO2_PIN' \
+        -- "$@"
+}
+
+free_keyslot() {
+    cryptsetup luksDump --dump-json-metadata "$1" | python3 -Ic '
+import json, sys
+used = set(map(int, json.load(sys.stdin)["keyslots"]))
+print(next(i for i in range(32) if i not in used))'
+}
+
+keyslot_exists() {
+    cryptsetup luksDump --dump-json-metadata "$1" | python3 -Ic '
+import json, sys
+sys.exit(0 if sys.argv[1] in json.load(sys.stdin)["keyslots"] else 1)' "$2"
+}
+
+BUILD= MAPPERS=()
+cleanup() {
+    local m
+    for ((i = ${#MAPPERS[@]} - 1; i >= 0; i--)); do
+        m=${MAPPERS[i]}
+        [[ -e /dev/mapper/$m ]] && { "$SCD" detach "$m" 2>/dev/null || cryptsetup close "$m" 2>/dev/null || true; }
+    done
+    if [[ -n $BUILD && -d $BUILD ]]; then
+        find "$BUILD" -type f -exec shred -u {} + 2>/dev/null || true
+        rm -rf "$BUILD"
+    fi
+}
+trap cleanup EXIT
+
+new_build_dir() {
+    BUILD=$(mktemp -d /run/tokenvault.XXXXXX)   # /run is tmpfs: secrets never hit disk
+}
+
+# Opens $1 (vault image) through the real boot code path; sets VAULT_SECRET
+# to a tmpfs file holding the payload. Not a subshell: cleanup tracks MAPPERS.
+open_vault() {
+    local img=$1 tag=$2 fdev=$3
+    local outer=tv-$tag-$$-tpm2 inner=tv-$tag-$$-fido2
+    MAPPERS+=("$outer")
+    say "unlocking TPM2 layer (TPM2 PIN from config)"
+    with_pins "$SCD" attach "$outer" "$img" none \
+        "tpm2-device=$TPM2_DEVICE,token-timeout=10s,readonly,password-cache=no,tries=1" \
+        || die "TPM2 layer did not open"
+    MAPPERS+=("$inner")
+    say "unlocking FIDO2 layer (FIDO2 PIN from config) - touch the key when it blinks"
+    with_pins "$SCD" attach "$inner" "/dev/mapper/$outer" none \
+        "fido2-device=$fdev,token-timeout=10s,readonly,password-cache=no,tries=1" \
+        || die "FIDO2 layer did not open"
+    VAULT_SECRET=$BUILD/secret.$tag
+    head -c "$SECRET_LENGTH" "/dev/mapper/$inner" > "$VAULT_SECRET"
+    "$SCD" detach "$inner"
+    "$SCD" detach "$outer"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_enroll() {
+    load_conf
+    load_state
+    new_build_dir
+    local fdev k1=$BUILD/k1 k2=$BUILD/k2 img=$BUILD/vault.img secret=$BUILD/secret
+    local outer=tv-build-$$-outer inner=tv-build-$$-inner slot old_slot=${TARGET_KEYSLOT:-}
+
+    say "target: $TARGET (UUID $TARGET_UUID) -> /dev/mapper/$TARGET_NAME"
+    fdev=$(fido2_device)
+    say "FIDO2 key: $fdev"
+    FIDO2_PIN=$FIDO2_PIN FIDO2_CURRENT_PIN=$FIDO2_CURRENT_PIN \
+        python3 -I "$LIBDIR/lib/fido2-pin.py" ensure "$fdev"
+
+    python3 -Ic '
+import secrets, string, sys
+alphabet = string.ascii_letters + string.digits + "!#%&()*+,-./:;<=>?@[]^_{|}~"
+sys.stdout.write("".join(secrets.choice(alphabet) for _ in range(int(sys.argv[1]))))' \
+        "$SECRET_LENGTH" > "$secret"
+    head -c 64 /dev/urandom > "$k1"
+    head -c 64 /dev/urandom > "$k2"
+
+    # Bootstrap keyslots (random keys, low KDF cost) exist only inside this
+    # tmpfs build and are killed once the tokens are enrolled.
+    local fmt=(--batch-mode --type luks2 --key-size "$VAULT_KEY_SIZE" --hash "$VAULT_HASH"
+               --pbkdf pbkdf2 --pbkdf-force-iterations 1000
+               --luks2-metadata-size 64k --luks2-keyslots-size 2M)
+    truncate -s 8M "$img"
+    say "formatting outer layer ($OUTER_CIPHER, ${VAULT_KEY_SIZE}-bit)"
+    cryptsetup luksFormat "${fmt[@]}" --cipher "$OUTER_CIPHER" --label tokenvault-tpm2 \
+        --key-file "$k1" "$img" 2>/dev/null
+    MAPPERS+=("$outer")
+    cryptsetup open --key-file "$k1" "$img" "$outer"
+    say "formatting inner layer ($INNER_CIPHER, ${VAULT_KEY_SIZE}-bit)"
+    cryptsetup luksFormat "${fmt[@]}" --cipher "$INNER_CIPHER" --label tokenvault-fido2 \
+        --key-file "$k2" "/dev/mapper/$outer" 2>/dev/null
+    MAPPERS+=("$inner")
+    cryptsetup open --key-file "$k2" "/dev/mapper/$outer" "$inner"
+    dd if="$secret" of="/dev/mapper/$inner" bs=4096 conv=fsync status=none
+    cryptsetup close "$inner"
+
+    say "enrolling FIDO2 (client PIN + user presence) on inner layer - touch the key when it blinks"
+    with_pins systemd-cryptenroll --unlock-key-file="$k2" --fido2-device="$fdev" \
+        --fido2-with-client-pin=yes --fido2-with-user-presence=yes \
+        --fido2-with-user-verification=no "/dev/mapper/$outer" </dev/null
+    cryptsetup luksRemoveKey --batch-mode --key-file "$k2" "/dev/mapper/$outer"
+    cryptsetup close "$outer"
+
+    say "enrolling TPM2 (PCRs '${TPM2_PCRS}' + PIN) on outer layer"
+    NEWPIN=$TPM2_PIN systemd-cryptenroll --unlock-key-file="$k1" --tpm2-device="$TPM2_DEVICE" \
+        --tpm2-pcrs="$TPM2_PCRS" --tpm2-with-pin=yes \
+        --tpm2-argon2id-memory="$TPM2_ARGON2ID_MEMORY" \
+        --tpm2-argon2id-parallelism="$TPM2_ARGON2ID_PARALLELISM" "$img" </dev/null
+    cryptsetup luksRemoveKey --batch-mode --key-file "$k1" "$img"
+
+    say "verifying the new vault through the boot code path"
+    open_vault "$img" verify "$fdev"
+    cmp -s "$VAULT_SECRET" "$secret" || die "vault returned a wrong secret"
+
+    say "adding vault passphrase as a new keyslot of $TARGET"
+    local oldpass=$BUILD/oldpass
+    if [[ -n $TARGET_PASSPHRASE ]]; then
+        printf %s "$TARGET_PASSPHRASE" > "$oldpass"
+    else
+        local pw
+        read -rsp "existing passphrase for $TARGET: " pw </dev/tty; echo
+        printf %s "$pw" > "$oldpass"
+        unset pw
+    fi
+    slot=$(free_keyslot "$TARGET")
+    # The secret carries ~6.5 bits/char of entropy, so a low-cost PBKDF2 is
+    # sufficient and keeps the boot fast and the initramfs RAM need small.
+    cryptsetup luksAddKey --batch-mode --key-file "$oldpass" --new-key-slot "$slot" \
+        --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --hash sha512 "$TARGET" "$secret"
+    cryptsetup open --test-passphrase --key-slot "$slot" --key-file "$secret" "$TARGET" \
+        || die "new keyslot $slot does not open with the vault secret"
+
+    say "installing vault to $VAULT"
+    install -d -m 700 "$(dirname "$VAULT")"
+    cp "$img" "$VAULT.new"
+    sync -f "$VAULT.new"
+    mv -f "$VAULT.new" "$VAULT"
+    sync -f "$VAULT"
+    write_state "$slot"
+
+    if [[ -n $old_slot && $old_slot != "$slot" ]] && keyslot_exists "$TARGET" "$old_slot"; then
+        say "killing previous vault keyslot $old_slot"
+        cryptsetup luksKillSlot --batch-mode "$TARGET" "$old_slot" </dev/null
+    fi
+    say "enrolled: vault keyslot $slot; your existing passphrase still works as recovery"
+    [[ -f $HOOK_DST ]] && say "hook already installed; run 'tokenvault install' only if boot options changed"
+    return 0
+}
+
+cmd_verify() {
+    load_conf
+    load_state
+    [[ -n $TARGET_KEYSLOT ]] || die "not enrolled"
+    [[ -f $VAULT ]] || die "vault $VAULT missing"
+    new_build_dir
+    open_vault "$VAULT" check "$(fido2_device)"
+    cryptsetup open --test-passphrase --key-slot "$TARGET_KEYSLOT" --key-file "$VAULT_SECRET" "$TARGET" \
+        || die "vault secret does not open keyslot $TARGET_KEYSLOT of $TARGET"
+    say "OK: TPM2+PIN and FIDO2+PIN+touch open the vault, and it unlocks $TARGET (keyslot $TARGET_KEYSLOT)"
+}
+
+regen_initramfs() {
+    if command -v limine-mkinitcpio >/dev/null; then
+        say "rebuilding initramfs via limine-mkinitcpio (keeps Limine's hashes in sync)"
+        limine-mkinitcpio
+    else
+        say "rebuilding initramfs via mkinitcpio -P"
+        /usr/bin/mkinitcpio -P
+    fi
+}
+
+cmd_install() {
+    load_conf
+    load_state
+    [[ -n $TARGET_KEYSLOT && -f $VAULT ]] || die "run 'tokenvault enroll' first"
+    local hooks
+    hooks=$(bash -c 'source /etc/mkinitcpio.conf; for f in /etc/mkinitcpio.conf.d/*.conf; do [[ -e $f && $f != '"$DROPIN"' ]] && source "$f"; done; echo " ${HOOKS[*]} "')
+    [[ $hooks == *" systemd "* && $hooks == *" sd-encrypt "* ]] \
+        || die "mkinitcpio HOOKS need 'systemd' and 'sd-encrypt' (have:$hooks)"
+    if [[ $LIBDIR != "$PREFIX" ]]; then
+        install -d -m 755 "$PREFIX/lib" "$PREFIX/initcpio"
+        install -m 755 "$SELF" "$PREFIX/tokenvault"
+        install -m 755 "$LIBDIR"/lib/*.py "$PREFIX/lib/"
+        install -m 644 "$LIBDIR/initcpio/tokenvault" "$PREFIX/initcpio/tokenvault"
+        ln -sf "$PREFIX/tokenvault" /usr/local/bin/tokenvault
+    fi
+    install -D -m 644 "$PREFIX/initcpio/tokenvault" "$HOOK_DST"
+    install -D -m 644 /dev/stdin "$DROPIN" <<'EOF'
+# added by tokenvault: unlock the target LUKS volume from the ESP vault
+HOOKS+=(tokenvault)
+EOF
+    regen_initramfs
+    check_initramfs
+    say "installed. Reboot: TPM2 PIN prompt, then FIDO2 PIN + touch."
+}
+
+# Build a scratch image with the live config and prove the unit wiring is
+# present and that no PIN / vault secret leaked into it.
+check_initramfs() {
+    new_build_dir
+    local img=$BUILD/check.img x=$BUILD/x
+    /usr/bin/mkinitcpio -g "$img" >/dev/null 2>&1 || die "mkinitcpio test build failed"
+    mkdir "$x"
+    (cd "$x" && lsinitcpio -x "$img")
+    local f
+    for f in etc/crypttab etc/systemd/system/tokenvault-tpm2.service \
+             etc/systemd/system/tokenvault-fido2.service etc/systemd/system/tokenvault-close.service \
+             etc/systemd/system/run-tokenvault-esp.mount; do
+        [[ -f $x/$f ]] || die "initramfs is missing /$f"
+    done
+    grep -q "^$TARGET_NAME .*/dev/mapper/tokenvault-fido2" "$x/etc/crypttab" \
+        || die "initramfs crypttab does not route $TARGET_NAME through the vault"
+    if grep -rqaF -e "$TPM2_PIN" -e "$FIDO2_PIN" "$x"; then
+        die "a token PIN was found inside the initramfs - refusing"
+    fi
+    [[ -e $x/etc/tokenvault ]] && die "/etc/tokenvault leaked into the initramfs"
+    say "initramfs check passed (units present, no PINs inside)"
+}
+
+cmd_uninstall() {
+    local purge=${1:-}
+    load_conf
+    load_state
+    rm -f "$DROPIN" "$HOOK_DST"
+    regen_initramfs
+    if [[ $purge == --purge ]]; then
+        if [[ -n $TARGET_KEYSLOT ]] && keyslot_exists "$TARGET" "$TARGET_KEYSLOT"; then
+            local n
+            n=$(cryptsetup luksDump --dump-json-metadata "$TARGET" | python3 -Ic 'import json,sys; print(len(json.load(sys.stdin)["keyslots"]))')
+            [[ $n -gt 1 ]] || die "keyslot $TARGET_KEYSLOT is the only one left; not killing it"
+            cryptsetup luksKillSlot --batch-mode "$TARGET" "$TARGET_KEYSLOT" </dev/null
+            say "killed vault keyslot $TARGET_KEYSLOT"
+        fi
+        rm -f "$VAULT" "$STATE"
+        rmdir "$(dirname "$VAULT")" 2>/dev/null || true
+    fi
+    say "uninstalled"
+}
+
+cmd_status() {
+    load_conf
+    load_state
+    echo "target:        $TARGET (UUID $TARGET_UUID) -> $TARGET_NAME"
+    echo "vault:         $VAULT $([[ -f $VAULT ]] && echo present || echo MISSING)"
+    echo "keyslot:       ${TARGET_KEYSLOT:-none} $([[ -n $TARGET_KEYSLOT ]] && keyslot_exists "$TARGET" "$TARGET_KEYSLOT" && echo '(present)')"
+    echo "hook:          $([[ -f $HOOK_DST && -f $DROPIN ]] && echo installed || echo 'not installed')"
+    echo "ciphers:       outer $OUTER_CIPHER / inner $INNER_CIPHER, ${VAULT_KEY_SIZE}-bit"
+    if [[ -f $VAULT ]]; then
+        echo "outer tokens:  $(cryptsetup luksDump --dump-json-metadata "$VAULT" | python3 -Ic '
+import json, sys
+print(" ".join(t["type"] for t in json.load(sys.stdin)["tokens"].values()) or "NONE")')"
+    fi
+    local fdev
+    if fdev=$(fido2_device 2>/dev/null); then
+        echo "fido2:         $fdev $(python3 -I "$LIBDIR/lib/fido2-pin.py" info "$fdev")"
+    else
+        echo "fido2:         no single key plugged in"
+    fi
+    local tcti=
+    case $TPM2_DEVICE in
+        auto) ;;
+        /dev/*) tcti=device:$TPM2_DEVICE ;;
+        *) tcti=$TPM2_DEVICE ;;
+    esac
+    echo "tpm2 lockout:  $(TPM2TOOLS_TCTI=$tcti tpm2_getcap properties-variable 2>/dev/null \
+        | awk '/TPM2_PT_LOCKOUT_COUNTER|TPM2_PT_MAX_AUTH_FAIL|inLockout/ {sub(":", "="); printf "%s ", $1 $2}' || echo unknown)"
+}
+
+case "${1:-}" in
+    enroll) cmd_enroll ;;
+    verify) cmd_verify ;;
+    install) cmd_install ;;
+    uninstall) shift; cmd_uninstall "${1:-}" ;;
+    status) cmd_status ;;
+    -h|--help|help|"") usage ;;
+    *) usage >&2; exit 2 ;;
+esac

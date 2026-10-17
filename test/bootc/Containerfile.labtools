@@ -1,0 +1,4 @@
+# Lab-only tooling for the sealed-UKI e2e (never part of the product image):
+# virt-fw-vars (OVMF Secure Boot custom-mode vars), ukify + sbsign (lab addon).
+FROM quay.io/fedora/fedora:44
+RUN dnf -y install python3-virt-firmware systemd-ukify sbsigntools && dnf clean all

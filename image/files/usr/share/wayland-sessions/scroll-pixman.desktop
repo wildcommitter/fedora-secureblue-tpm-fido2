@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=scroll (software rendering)
+Comment=scroll with the pixman renderer, no GPU acceleration in the compositor
+Exec=env WLR_RENDERER=pixman scroll
+Type=Application
+DesktopNames=scroll

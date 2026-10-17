@@ -1,0 +1,9 @@
+[Unit]
+Description=Headless scroll session (pixman) exported via wayvnc on 127.0.0.1:5900
+
+[Service]
+ExecStart=/usr/libexec/scroll-headless
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

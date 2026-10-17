@@ -1,0 +1,45 @@
+# tokenvault configuration -> /etc/tokenvault/tokenvault.conf (root:root 0600)
+#
+#   run0 install -d -m 700 /etc/tokenvault
+#   run0 install -m 600 /usr/share/tokenvault/tokenvault.conf.example /etc/tokenvault/tokenvault.conf
+#
+# Read by `tokenvault enroll|verify|remove|status`. Never enters the boot
+# path: the signed UKI's initrd finds the vault on the ESP by itself.
+
+# ---- token passwords (plaintext, baked into the tokens) -------------------
+# TPM2: the PIN in the TPM2 policy of the vault's outer layer
+# (systemd-cryptenroll --tpm2-with-pin). Any characters are allowed.
+TPM2_PIN="change-me-tpm2"
+# FIDO2: the key's own client PIN. Set on a key without one; kept if it
+# already matches; changed if FIDO2_CURRENT_PIN holds the old one. Min 4
+# chars. A touch is always required as well.
+FIDO2_PIN="change-me-fido2"
+FIDO2_CURRENT_PIN=""
+
+# ---- target: the root LUKS2 volume ---------------------------------------
+# Empty = the device behind /dev/mapper/root (gpt-auto's root volume).
+TARGET_DEVICE=""
+# An existing passphrase of the target, used once per enroll to add the
+# vault keyslot. Empty = prompt. That passphrase stays as your recovery.
+TARGET_PASSPHRASE=""
+
+# ---- tokens ---------------------------------------------------------------
+TPM2_DEVICE="auto"                # auto | /dev/tpmrm0
+# Policy: literal PCR 7 (Secure Boot state with our own keys) AND a PCR 11
+# policy signed by the UKI's PCR key for the "enter-initrd" phase only, so
+# the outer layer opens only inside our signed initrd, on any of our UKIs.
+TPM2_PCRS="7"
+TPM2_PUBLIC_KEY="/usr/share/secureblue/uki/keys/PCR.pem"   # "" = literal PCRs only
+TPM2_PUBLIC_KEY_PCRS="11"
+TPM2_ARGON2ID_MEMORY="256M"       # systemd >= 262 only; ignored on older systemd
+TPM2_ARGON2ID_PARALLELISM="4"
+FIDO2_DEVICE="auto"               # auto (exactly one key plugged) | /dev/hidrawN
+
+# ---- vault (post-quantum symmetric cascade) -------------------------------
+# The vault always lives at <ESP>/tokenvault/vault.img (the initrd looks there).
+ESP="/boot"
+OUTER_CIPHER="aes-xts-plain64"     # TPM2 layer; 512-bit XTS key = AES-256
+INNER_CIPHER="serpent-xts-plain64" # FIDO2 layer; 512-bit XTS key = Serpent-256
+VAULT_KEY_SIZE="512"
+VAULT_HASH="sha512"
+SECRET_LENGTH="64"                 # chars of the root passphrase (~413 bits)

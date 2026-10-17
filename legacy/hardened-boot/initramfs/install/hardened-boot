@@ -1,0 +1,51 @@
+#!/bin/bash
+# mkinitcpio install hook. Place 'hardened-boot' in HOOKS before
+# 'sd-encrypt' (install.sh does this for you). Requires enroll.sh to have
+# already populated /etc/hardened-boot — build() will fail loudly if not.
+
+build() {
+    if [[ ! -f /etc/hardened-boot/hardened-boot.conf ]]; then
+        error "hardened-boot: /etc/hardened-boot is not set up — run enroll.sh first"
+        (( ++_builderrors ))
+        return 1
+    fi
+
+    add_module 'hid-generic?'
+
+    map add_binary \
+        '/usr/bin/bash' \
+        '/usr/bin/openssl' \
+        '/usr/bin/xxd' \
+        '/usr/bin/base64' \
+        '/usr/bin/cut' \
+        '/usr/bin/grep' \
+        '/usr/bin/sed' \
+        '/usr/bin/date' \
+        '/usr/bin/fido2-assert' \
+        '/usr/bin/fido2-token' \
+        '/usr/bin/systemd-creds' \
+        '/usr/lib/systemd/systemd-reply-password'
+
+    if [[ -x /usr/bin/plymouth ]]; then
+        add_binary '/usr/bin/plymouth'
+    fi
+
+    add_file '/usr/lib/hardened-boot/common.sh' '/usr/lib/hardened-boot/common.sh' 644
+    add_binary '/usr/lib/hardened-boot/agent.sh' '/usr/lib/hardened-boot/agent.sh' 755
+
+    add_dir '/etc/hardened-boot' 700
+    add_full_dir '/etc/hardened-boot'
+
+    add_systemd_unit 'hardened-boot-agent.service'
+}
+
+help() {
+    cat <<HELPEOF
+Adds the hardened-boot multi-factor LUKS unlock agent to the initramfs.
+Requires two passwords, a FIDO2 security key touch, and this machine's
+TPM2 to all be present at boot, combined via HKDF into a single LUKS
+keyslot. Run enroll.sh before rebuilding the image with this hook enabled.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

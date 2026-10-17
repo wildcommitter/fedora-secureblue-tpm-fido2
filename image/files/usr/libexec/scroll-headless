@@ -1,0 +1,6 @@
+#!/bin/sh
+# scroll with no GPU and no physical outputs, for remote use over wayvnc.
+export WLR_BACKENDS=headless
+export WLR_RENDERER=pixman
+export WLR_LIBINPUT_NO_DEVICES=1
+exec /usr/bin/scroll -c /etc/scroll/headless.conf

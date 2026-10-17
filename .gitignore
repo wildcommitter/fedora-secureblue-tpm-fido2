@@ -1,0 +1,13 @@
+# VM and test work dirs (disks, firmware vars, swtpm state, logs)
+**/work/
+*.qcow2
+*.raw
+*.iso
+# build outputs
+image/out/
+lockscreen/out/
+__pycache__/
+*.pyc
+# private keys never live here (SECRETS_DIR is on offline media); public
+# material under image/uki/keys/ and image/cosign.pub stays tracked
+*.key

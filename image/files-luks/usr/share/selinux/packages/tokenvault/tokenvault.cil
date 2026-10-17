@@ -1,0 +1,23 @@
+; tokenvault: SELinux type for /etc/tokenvault, which holds the plaintext
+; TPM2/FIDO2 PINs (tokenvault.conf) and the non-secret enrollment state.
+;
+; tokenvault_conf_t is a *security* file type like shadow_t: it is neither
+; non_security_file_type nor non_auth_file_type, so the broad "read config /
+; read all non-security files" rules that hundreds of confined domains have on
+; etc_t do not reach it. What remains is unconfined/admin access (the
+; `run0 tokenvault ...` shell runs as unconfined_t) and the relabel tooling.
+;
+; Installed at image build time: semodule -i tokenvault.cil
+
+(type tokenvault_conf_t)
+(roletype object_r tokenvault_conf_t)
+(typeattributeset file_type (tokenvault_conf_t))
+(typeattributeset security_file_type (tokenvault_conf_t))
+
+(filecon "/etc/tokenvault(/.*)?" any (system_u object_r tokenvault_conf_t ((s0) (s0))))
+
+; usr/lib/tmpfiles.d/tokenvault.conf creates /etc/tokenvault (0700) with the
+; label from file_contexts ("d") and relabels what is in it ("Z"), e.g. on a
+; machine where the directory predates this module and is still etc_t.
+(allow systemd_tmpfiles_t tokenvault_conf_t (dir (create getattr setattr open read search relabelfrom relabelto)))
+(allow systemd_tmpfiles_t tokenvault_conf_t (file (getattr relabelfrom relabelto)))
