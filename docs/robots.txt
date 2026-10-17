@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/sitemap.xml

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threat Model: What scroll-secure Defends Against, and What It Doesn't | scroll-secure</title>
+<meta name="description" content="The scroll-secure threat model: evil maid, stolen machine, offline brute force and boot tampering are covered. Runtime root compromise, downgrade to an older signed kernel, firmware implants and more are not. Find a hole and report it.">
+<link rel="canonical" href="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/threat-model.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="scroll-secure">
+<meta property="og:title" content="scroll-secure threat model: break it, we'll fix it">
+<meta property="og:description" content="What a hardened Fedora workstation with TPM2 + FIDO2 sealed unlock does and doesn't defend against, in plain words.">
+<meta property="og:url" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/threat-model.html">
+<meta property="og:image" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./">scroll<span>-secure</span></a>
+  <nav class="site" aria-label="Main">
+    <a href="tpm2-fido2-luks-unlock.html">Disk unlock</a>
+    <a href="secure-boot-own-keys.html">Own Secure Boot keys</a>
+    <a href="qubes-os-alternative.html">vs Qubes OS</a>
+    <a href="threat-model.html" aria-current="page">Threat model</a>
+    <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+<div class="hero"><div class="wrap">
+  <p class="eyebrow">Threat model · open for audit</p>
+  <h1>Here's exactly where we think it holds. Prove us wrong.</h1>
+  <p class="lede">A security project that hides its limits is marketing. This page lists what scroll-secure is designed to stop, what it can't stop, and what we haven't checked yet. Every hole you find becomes a fix, a credit and a regression test.</p>
+</div></div>
+
+<section><div class="wrap">
+  <h2>Designed to stop</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Attack</th><th>What stops it</th></tr>
+    <tr><td><strong>Stolen or seized machine, powered off</strong></td><td>The disk needs this machine's TPM <em>and</em> your FIDO2 key, each with its own PIN, or the recovery passphrase.</td></tr>
+    <tr><td><strong>Evil maid swaps the bootloader, kernel, initramfs or kernel command line</strong></td><td>Secure Boot with your keys only: unsigned code doesn't run. A kernel signed by anyone else also fails the signed PCR 11 policy, so the TPM releases nothing.</td></tr>
+    <tr><td><strong>Evil maid changes the firmware's Secure Boot settings or keys</strong></td><td>PCR 7 changes, so the TPM releases nothing. You notice because you're asked for the passphrase.</td></tr>
+    <tr><td><strong>Tampering with the OS on disk</strong></td><td>The composefs digest of <code>/usr</code> is in the signed command line, so a modified image doesn't boot.</td></tr>
+    <tr><td><strong>Guessing the PINs</strong></td><td>The TPM's dictionary-attack lockout, and the FIDO2 key's retry limit (3 per power-up, 8 in total, then it locks).</td></tr>
+    <tr><td><strong>A stolen FIDO2 key, or a shoulder-surfed PIN, alone</strong></td><td>Not enough. Both tokens and both PINs are required.</td></tr>
+    <tr><td><strong>Root on the running system asking the TPM for the disk key</strong></td><td>PCR 11 is extended when the initramfs ends, so the policy can't be satisfied again until reboot.</td></tr>
+    <tr><td><strong>A confined system service reading the PIN config</strong></td><td>The SELinux type <code>tokenvault_conf_t</code>. Tested: NetworkManager is denied.</td></tr>
+    <tr><td><strong>Walking up to an unlocked, idle session</strong></td><td>It auto-locks after 5 minutes and before suspend. Unlocking needs the key, the PIN, a touch and the password. A crashed locker leaves the session locked.</td></tr>
+  </table></div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>Not stopped. Know these.</h2>
+  <ul class="tight">
+    <li><strong>The recovery passphrase skips both tokens.</strong> LUKS keyslot 0 stays as your way back in, so your disk is only as strong as that passphrase. Make it long and random, and keep it offline.</li>
+    <li><strong>Root compromise while the system is running.</strong> The disk is open and its key is in memory. The PINs are in a root-only file (needed for unattended re-enrollment), so root can read them too.</li>
+    <li><strong>Downgrade to an older signed kernel.</strong> The signed PCR 11 policy accepts <em>any</em> UKI signed with your PCR key, including old ones with known bugs. Rotating the PCR key retires them, and re-enrollment is required.</li>
+    <li><strong>Firmware-level implants, malicious firmware updates, and the Intel ME / AMD PSP.</strong> These sit below Secure Boot.</li>
+    <li><strong>Escaping a VM.</strong> KVM shares the host kernel. This isn't Xen-grade isolation; see <a href="qubes-os-alternative.html">vs Qubes OS</a>.</li>
+    <li><strong>Coercion.</strong> If someone can make you type the PINs and touch the key, they get in.</li>
+    <li><strong>The headless remote session.</strong> VNC has no password: it listens only on loopback and is meant to be reached over SSH. Any local process on the host can connect to it, and it doesn't idle-lock.</li>
+  </ul>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Not evaluated yet</h2>
+  <ul class="tight">
+    <li>TPM bus sniffing and interposers on discrete TPMs</li>
+    <li>Cold boot and DMA attacks on a running machine</li>
+    <li>Side channels in the FIDO2 key's <code>hmac-secret</code> implementation</li>
+    <li>Real-hardware runs beyond the single machine this was built on</li>
+  </ul>
+  <h2>Found something? We want it.</h2>
+  <p>Report vulnerabilities privately through <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2/security/advisories/new">GitHub security advisories</a>. Use public issues for everything else. Confirmed findings get a fix, credit in the release notes, and a test in the e2e suite so they stay fixed.</p>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <p>scroll-secure is an independent project. It is not affiliated with or endorsed by Fedora, Red Hat, secureblue or the Qubes OS Project. This page loads no scripts, fonts or trackers.</p>
+</div></footer>
+</body>
+</html>

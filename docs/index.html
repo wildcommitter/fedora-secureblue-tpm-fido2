@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scroll-secure: Hardened Fedora with TPM2 + FIDO2 Disk Unlock and Your Own Secure Boot Keys</title>
+<meta name="description" content="A hardened Fedora Atomic workstation (secureblue + bootc) whose disk unlocks only for an untampered boot chain: TPM2 PIN plus FIDO2 key PIN and touch. Your own Secure Boot keys, a signed UKI, Anti Evil Maid ideas from Qubes OS.">
+<link rel="canonical" href="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="scroll-secure">
+<meta property="og:title" content="scroll-secure: a Linux workstation that won't unlock for a tampered boot">
+<meta property="og:description" content="Own Secure Boot keys, a sealed signed UKI, and a disk that opens only with TPM2 PIN + FIDO2 PIN + touch. Qubes-inspired Anti Evil Maid, on Fedora Atomic.">
+<meta property="og:url" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/">
+<meta property="og:image" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "scroll-secure",
+  "description": "Hardened Fedora Atomic (secureblue, bootc) workstation image with own Secure Boot keys, a signed sealed UKI, TPM2 + FIDO2 LUKS unlock and a FIDO2 lock screen.",
+  "codeRepository": "https://github.com/wildcommitter/fedora-secureblue-tpm-fido2",
+  "programmingLanguage": ["Shell", "Python", "Go"],
+  "runtimePlatform": "Fedora Atomic / secureblue (bootc)",
+  "keywords": "secure boot custom keys, TPM2 FIDO2 LUKS unlock, anti evil maid, Qubes OS alternative, secureblue, bootc, unified kernel image, hardened Linux workstation"
+}
+</script>
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./">scroll<span>-secure</span></a>
+  <nav class="site" aria-label="Main">
+    <a href="tpm2-fido2-luks-unlock.html">Disk unlock</a>
+    <a href="secure-boot-own-keys.html">Own Secure Boot keys</a>
+    <a href="qubes-os-alternative.html">vs Qubes OS</a>
+    <a href="threat-model.html">Threat model</a>
+    <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+<div class="hero"><div class="wrap">
+  <p class="eyebrow">Hardened Fedora Atomic · secureblue · bootc</p>
+  <h1>The Linux workstation that won't unlock for a tampered boot.</h1>
+  <p class="lede">scroll-secure signs everything from the bootloader to <code>/usr</code> with <strong>your</strong> keys, then seals the disk to that exact boot chain. To open it you need the TPM2 PIN <em>and</em> your FIDO2 key, its PIN <em>and</em> a touch. It brings the Anti Evil Maid idea from Qubes OS to a fast, everyday tiling desktop.</p>
+  <div class="cta">
+    <a class="btn primary" href="tpm2-fido2-luks-unlock.html">How the unlock works</a>
+    <a class="btn" href="threat-model.html">Read the threat model, then break it</a>
+  </div>
+</div></div>
+
+<section><div class="wrap">
+  <h2>Every layer signed. Every key yours.</h2>
+  <p class="sub">No Microsoft CA. No shim. No GRUB. No "trust us" anywhere in the boot chain.</p>
+  <div class="grid">
+    <div class="card"><h3>Your own Secure Boot keys</h3><p>Your PK, KEK and db replace the vendor's. The firmware runs only what you signed. Your discrete GPU's option ROM is allowlisted by hash from the TPM event log, so your screen doesn't go black.</p></div>
+    <div class="card"><h3>Sealed, signed UKI</h3><p>Kernel, initramfs and kernel command line are signed as one file. The command line carries the composefs digest of the OS, so a modified <code>/usr</code> doesn't boot.</p></div>
+    <div class="card"><h3>Anti Evil Maid unlock</h3><p>The TPM releases its share only for your boot chain: PCR 7 plus a PCR 11 policy signed with your key, plus the TPM2 PIN. Change the bootloader, kernel or firmware keys and the disk stays shut.</p></div>
+    <div class="card"><h3>Two tokens. AND, never OR.</h3><p>Outer layer AES-256-XTS on the TPM2, inner layer Serpent-256-XTS on the FIDO2 key (PIN + touch). Two cipher families, two separate devices. Either one alone opens nothing.</p></div>
+    <div class="card"><h3>Sealed again after boot</h3><p>When the initramfs hands over, PCR 11 moves on. From then on, even root on the running system can't get the TPM to release its share again.</p></div>
+    <div class="card"><h3>Hardware lock screen</h3><p>A GTK4 <code>ext-session-lock</code> locker: FIDO2 PIN plus touch, then your password. If the locker crashes, the session stays locked. Without the key, the password prompt never appears.</p></div>
+    <div class="card"><h3>Compartments on KVM</h3><p>libvirt with a virtual TPM and Secure Boot in the guests. Do risky work in a VM, Qubes-style, with your desktop still native and GPU-fast.</p></div>
+    <div class="card"><h3>Atomic, signed updates</h3><p>One container image, cosign-verified on install. <code>bootc upgrade</code> swaps in a newly signed UKI, with rollback from the boot menu.</p></div>
+    <div class="card"><h3>Remote desktop, no GPU needed</h3><p>A software-rendered (pixman) headless scroll session with wayvnc, listening on loopback only and reached over SSH.</p></div>
+  </div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>Tested the way an attacker would try it.</h2>
+  <p class="sub">Every unlock path and every failure path runs end to end in KVM, with OVMF Secure Boot in custom mode, swtpm, and a virtual CTAP2 key on a USB gadget. Nothing is mocked.</p>
+  <div class="stats">
+    <div class="stat"><b>11/11</b><span>disk unlock scenarios: wrong TPM PIN, wrong FIDO2 PIN, no touch, no key, a foreign TPM, sealed after boot, SELinux confinement, key rotation, removal</span></div>
+    <div class="stat"><b>7/7</b><span>lock screen PAM tests with the virtual FIDO2 key</span></div>
+    <div class="stat"><b>7/7</b><span>lock screen GUI tests under headless scroll, including crash takeover</span></div>
+    <div class="stat"><b>1</b><span>end-to-end Secure Boot enrollment from Setup Mode, booted enforced with an option ROM hash in db</span></div>
+  </div>
+  <p>The build fails if the signed UKI is missing a section, its PCR signature or any unlock component in the initramfs. <code>bootc container lint --fatal-warnings</code> gates every image.</p>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Built on giants. Honest about the gaps.</h2>
+  <ul class="tight">
+    <li><strong>secureblue</strong> supplies the hardened Fedora Atomic base: hardened kernel and memory allocator, <code>lockdown=confidentiality</code>, enforced module signatures, SMT off, usbguard. Its sealed-UKI pipeline is vendored here, and upstream still labels it "testing".</li>
+    <li><strong>systemd</strong> does the heavy lifting: <code>systemd-cryptenroll</code>, signed PCR policies, <code>ukify</code>, systemd-boot.</li>
+    <li><strong>Qubes OS</strong> inspired the Anti Evil Maid goal. This is <em>not</em> Qubes: KVM doesn't give you Xen's isolation. <a href="qubes-os-alternative.html">See the full comparison</a>.</li>
+  </ul>
+  <p class="note"><strong>Unaudited, so far.</strong> This runs on one real machine, and its test suite is the only evidence we have. That's the invitation: read the <a href="threat-model.html">threat model</a>, find what we missed, and <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2/security">report it</a>. Every confirmed bug gets fixed, credited and turned into a regression test.</p>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <p>scroll-secure is an independent project. It is not affiliated with or endorsed by Fedora, Red Hat, secureblue or the Qubes OS Project; their names are used only to describe compatibility and inspiration. This page loads no scripts, fonts or trackers.</p>
+</div></footer>
+</body>
+</html>

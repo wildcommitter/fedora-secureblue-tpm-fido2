@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Custom Secure Boot Keys Without a Black Screen: GPU Option ROM Hashes | scroll-secure</title>
+<meta name="description" content="Enroll your own Secure Boot PK, KEK and db without the Microsoft CA and keep your discrete GPU working: add the option ROM hashes from the TPM event log to db. Bash script with dry run, ESP signature checks, backup and read-back.">
+<link rel="canonical" href="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/secure-boot-own-keys.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="scroll-secure">
+<meta property="og:title" content="Your own Secure Boot keys, without the black screen">
+<meta property="og:description" content="Dropping the Microsoft CA blocks your GPU's option ROM. Here is how to allowlist it by hash from the TPM event log.">
+<meta property="og:url" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/secure-boot-own-keys.html">
+<meta property="og:image" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Custom Secure Boot keys without a black screen: GPU option ROM hashes",
+  "about": ["UEFI Secure Boot", "Platform Key", "option ROM", "TPM event log", "efitools", "sbsigntools"],
+  "isPartOf": {"@type": "WebSite", "name": "scroll-secure", "url": "https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/"}
+}
+</script>
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./">scroll<span>-secure</span></a>
+  <nav class="site" aria-label="Main">
+    <a href="tpm2-fido2-luks-unlock.html">Disk unlock</a>
+    <a href="secure-boot-own-keys.html" aria-current="page">Own Secure Boot keys</a>
+    <a href="qubes-os-alternative.html">vs Qubes OS</a>
+    <a href="threat-model.html">Threat model</a>
+    <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+<div class="hero"><div class="wrap">
+  <p class="eyebrow">UEFI Secure Boot · PK / KEK / db</p>
+  <h1>Your own Secure Boot keys. Without the black screen.</h1>
+  <p class="lede">Replace the vendor keys and drop the Microsoft CA, and the firmware stops trusting the GPU's option ROM. On a machine with no integrated graphics, that means no display before the OS boots, including firmware setup. scroll-secure allowlists exactly your card's firmware driver, by hash.</p>
+</div></div>
+
+<section><div class="wrap">
+  <h2>Why the screen goes black</h2>
+  <p>A discrete GPU carries its own UEFI driver, the GOP, in an option ROM. Vendors sign it with Microsoft's third-party UEFI CA. Once your db holds only your certificate, the firmware refuses to load that driver.</p>
+  <p>The usual advice is "keep the Microsoft keys", but then anything Microsoft ever signed can boot on your machine. The precise fix is to add the <strong>SHA-256 hash of that one driver</strong> to db.</p>
+  <h2>Where the hash comes from</h2>
+  <p>The firmware already measures every option ROM driver it loads into the TPM: PCR 2, event type <code>EV_EFI_BOOT_SERVICES_DRIVER</code>. The event log records its Authenticode SHA-256, the exact value db expects. Nothing is guessed and no ROM gets dumped. The same idea as <code>sbctl enroll-keys --tpm-eventlog</code>, in a self-contained bash script.</p>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>One script: create, enroll, status</h2>
+<pre><code># on a trusted machine, keys onto offline media
+SECRETS_DIR=/media/keys image/uki/secure-boot-keys.sh create
+
+# on the installed system, firmware in Setup Mode
+run0 /usr/libexec/scroll-secure/secure-boot-keys enroll --dry-run
+run0 /usr/libexec/scroll-secure/secure-boot-keys enroll
+run0 /usr/libexec/scroll-secure/secure-boot-keys status</code></pre>
+  <p><code>enroll</code> fails closed. It refuses to write anything if:</p>
+  <ul class="tight">
+    <li>the firmware isn't in Setup Mode</li>
+    <li>any <code>.efi</code> on the ESP isn't signed by the db certificate you're enrolling, which would mean an unbootable machine</li>
+    <li>the TPM event log can't be read or parsed. Silently dropping the ROM hashes is how black screens happen.</li>
+  </ul>
+  <p>Before writing, it backs up the current PK, KEK, db and dbx. It writes db, then KEK, then PK last, which leaves Setup Mode. Then it reads every variable back and checks that your certificates and every ROM hash actually landed.</p>
+  <p class="note">Tested end to end in KVM: OVMF starts in Setup Mode with a NIC whose option ROM is measured. The script enrolls, and the next boot runs with Secure Boot enforced on a chain signed with your keys and the ROM hash in db. On real hardware, keep the CMOS-clear route to factory keys in mind as your way back.</p>
+</div></section>
+
+<section><div class="wrap">
+  <h2>What else your keys sign</h2>
+  <ul class="tight">
+    <li><strong>systemd-boot</strong> and the <strong>unified kernel image</strong> (kernel + initramfs + command line), on every build</li>
+    <li>The <strong>PCR 11 policy</strong>, with a separate PCR key, so the TPM unlocks only kernels you built. <a href="tpm2-fido2-luks-unlock.html">How the disk unlock uses it →</a></li>
+    <li>The <strong>container image</strong>, with cosign. The installer pulls nothing it can't verify.</li>
+  </ul>
+  <p>Private keys never enter a build layer. They're mounted as podman build secrets for the signing steps only, from media you keep offline.</p>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <p>scroll-secure is an independent project. It is not affiliated with or endorsed by Fedora, Red Hat, secureblue or the Qubes OS Project. This page loads no scripts, fonts or trackers.</p>
+</div></footer>
+</body>
+</html>

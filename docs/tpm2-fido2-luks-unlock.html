@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPM2 + FIDO2 LUKS Unlock with Both Tokens Required (AND, not OR) | scroll-secure</title>
+<meta name="description" content="How scroll-secure unlocks a LUKS2 root disk only with a TPM2 PIN and a FIDO2 key (PIN + touch) together, sealed to Secure Boot PCR 7 and a signed PCR 11 policy, using stock systemd-cryptsetup in the initramfs.">
+<link rel="canonical" href="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/tpm2-fido2-luks-unlock.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="scroll-secure">
+<meta property="og:title" content="TPM2 AND FIDO2: two-token LUKS unlock with stock systemd">
+<meta property="og:description" content="systemd-cryptenroll lets TPM2 or FIDO2 unlock a disk: either one. Here is how to require both, with a signed PCR 11 policy and a seal after boot.">
+<meta property="og:url" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/tpm2-fido2-luks-unlock.html">
+<meta property="og:image" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "TPM2 + FIDO2 LUKS unlock with both tokens required",
+  "about": ["LUKS2", "TPM2", "FIDO2", "systemd-cryptenroll", "Secure Boot", "PCR policy"],
+  "isPartOf": {"@type": "WebSite", "name": "scroll-secure", "url": "https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/"}
+}
+</script>
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./">scroll<span>-secure</span></a>
+  <nav class="site" aria-label="Main">
+    <a href="tpm2-fido2-luks-unlock.html" aria-current="page">Disk unlock</a>
+    <a href="secure-boot-own-keys.html">Own Secure Boot keys</a>
+    <a href="qubes-os-alternative.html">vs Qubes OS</a>
+    <a href="threat-model.html">Threat model</a>
+    <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+<div class="hero"><div class="wrap">
+  <p class="eyebrow">tokenvault · LUKS2 · systemd-cryptsetup</p>
+  <h1>TPM2 <em>and</em> FIDO2. Both, or the disk stays shut.</h1>
+  <p class="lede"><code>systemd-cryptenroll</code> gives every token its own keyslot, so a TPM2 enrollment and a FIDO2 enrollment each open the disk alone. That's OR. tokenvault chains them into AND, using only stock systemd units in the initramfs.</p>
+</div></div>
+
+<section><div class="wrap">
+  <h2>The trick: a vault inside a vault</h2>
+  <p>The root partition gets one extra keyslot. Its passphrase is random and lives in a small, two-layer LUKS2 vault on the ESP. To read it, you have to get through both layers in order:</p>
+<pre><code>ESP  /tokenvault/vault.img
+ └─ outer LUKS2   AES-256-XTS
+     unlocked by the TPM2: PCR 7 + signed PCR 11 + TPM2 PIN
+     └─ inner LUKS2   Serpent-256-XTS
+         unlocked by the FIDO2 key: client PIN + touch (hmac-secret)
+         └─ payload: 64-character passphrase → keyslot of the root partition</code></pre>
+  <p>The two layers use two cipher families on two devices. The TPM never sees the FIDO2 secret, and the key never sees the TPM's. Your install passphrase stays in keyslot 0 as the offline recovery path.</p>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>What you see at boot</h2>
+  <ol class="flow">
+    <li><strong>"Please enter TPM2 PIN".</strong> The TPM checks the PIN against a policy bound to PCR 7 (your Secure Boot state) and PCR 11 (a UKI signed by <em>your</em> PCR key, inside the initramfs phase).</li>
+    <li><strong>"Please enter security token PIN".</strong> The FIDO2 key verifies its own client PIN, with its own retry counter.</li>
+    <li><strong>Touch the key.</strong> User presence is required, so malware can't silently use a key that happens to be plugged in.</li>
+    <li><strong>Root unlocks.</strong> gpt-auto's unmodified <code>systemd-cryptsetup@root</code> takes the cached passphrase. It is revoked as soon as root is open, and expires after 120 s at most.</li>
+    <li><strong>The seal.</strong> PCR 11 is extended past the initramfs phase. The running system can no longer make the TPM release anything.</li>
+  </ol>
+  <p>If any step fails, nothing is cached and you get the normal passphrase prompt. The causes include a wrong PIN, a missing key, no touch, a foreign TPM, a changed Secure Boot state or an unsigned kernel.</p>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Why a <em>signed</em> PCR 11 policy</h2>
+  <p>Binding to literal PCR values breaks on every kernel update. Here, <code>ukify</code> signs the expected PCR 11 value of each UKI with an offline PCR key. The TPM accepts any UKI carrying a valid signature from that key, and nothing else. Updates keep unlocking with no re-enrollment, and a forged kernel never unlocks.</p>
+  <p>PCR 7 is bound literally, because it changes only when you change firmware keys, and you want re-enrollment then.</p>
+  <h2>Hardened around the edges</h2>
+  <ul class="tight">
+    <li>The PIN config is labeled with its own SELinux type, <code>tokenvault_conf_t</code>, so confined services can't read it. The e2e suite proves NetworkManager is denied.</li>
+    <li>The ESP is found through <code>LoaderDevicePartUUID</code>, with no kernel arguments, because the command line is sealed in the UKI.</li>
+    <li><code>tokenvault verify</code> checks the vault, the root keyslot, the UKI's sections and PCR signature, and that the TPM now <em>refuses</em>.</li>
+  </ul>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>Proven in 11 scenarios</h2>
+  <p>KVM, OVMF Secure Boot in custom mode, swtpm and a virtual CTAP2 key on a Linux USB gadget, with the real initramfs from the signed image:</p>
+  <div class="table-wrap"><table>
+    <tr><th>Scenario</th><th>Expected</th></tr>
+    <tr><td>Correct TPM2 PIN, FIDO2 PIN and touch</td><td class="yes">Root unlocks, no passphrase</td></tr>
+    <tr><td>After boot, ask the TPM again</td><td class="yes">Refused (sealed)</td></tr>
+    <tr><td>Wrong TPM2 PIN</td><td class="yes">Passphrase fallback</td></tr>
+    <tr><td>Wrong FIDO2 PIN</td><td class="yes">Passphrase fallback</td></tr>
+    <tr><td>No touch</td><td class="yes">Passphrase fallback</td></tr>
+    <tr><td>No key plugged in</td><td class="yes">Passphrase fallback</td></tr>
+    <tr><td>Foreign TPM</td><td class="yes">Passphrase fallback</td></tr>
+    <tr><td>Confined service reads the PIN config</td><td class="yes">Denied by SELinux</td></tr>
+    <tr><td>Rotate the payload</td><td class="yes">Previous keyslot retired, the new one unlocks</td></tr>
+    <tr><td>Remove the enrollment</td><td class="yes">Only the recovery passphrase keyslot is left</td></tr>
+  </table></div>
+  <p style="margin-top:1rem"><a href="threat-model.html">What this does and doesn't defend against →</a></p>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <p>scroll-secure is an independent project. It is not affiliated with or endorsed by Fedora, Red Hat, secureblue or the Qubes OS Project. This page loads no scripts, fonts or trackers.</p>
+</div></footer>
+</body>
+</html>

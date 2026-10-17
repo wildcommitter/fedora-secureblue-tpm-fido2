@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qubes OS Alternative? scroll-secure vs Qubes OS, Compared Honestly | scroll-secure</title>
+<meta name="description" content="An honest comparison of Qubes OS and scroll-secure, a hardened Fedora Atomic workstation with own Secure Boot keys and TPM2 + FIDO2 Anti Evil Maid-style disk unlock. What we borrowed from Qubes, what we can't match, and who should pick which.">
+<link rel="canonical" href="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/qubes-os-alternative.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="scroll-secure">
+<meta property="og:title" content="Qubes OS vs scroll-secure: an honest comparison">
+<meta property="og:description" content="Anti Evil Maid ideas from Qubes OS on a hardened Fedora Atomic desktop. Here is what that buys you, and what it doesn't.">
+<meta property="og:url" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/qubes-os-alternative.html">
+<meta property="og:image" content="https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Qubes OS vs scroll-secure: an honest comparison",
+  "about": ["Qubes OS", "Anti Evil Maid", "compartmentalization", "Secure Boot", "TPM2", "FIDO2", "secureblue"],
+  "isPartOf": {"@type": "WebSite", "name": "scroll-secure", "url": "https://wildcommitter.github.io/fedora-secureblue-tpm-fido2/"}
+}
+</script>
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./">scroll<span>-secure</span></a>
+  <nav class="site" aria-label="Main">
+    <a href="tpm2-fido2-luks-unlock.html">Disk unlock</a>
+    <a href="secure-boot-own-keys.html">Own Secure Boot keys</a>
+    <a href="qubes-os-alternative.html" aria-current="page">vs Qubes OS</a>
+    <a href="threat-model.html">Threat model</a>
+    <a href="https://github.com/wildcommitter/fedora-secureblue-tpm-fido2">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+<div class="hero"><div class="wrap">
+  <p class="eyebrow">Qubes OS alternative · comparison</p>
+  <h1>Qubes OS is the gold standard. Here's what we took from it.</h1>
+  <p class="lede">Qubes OS isolates everything in Xen domains. That's the strongest desktop security model in production. scroll-secure isn't that, and won't pretend to be. It takes the Qubes ideas that work on a normal Linux desktop and makes them the default on hardened Fedora Atomic.</p>
+</div></div>
+
+<section><div class="wrap">
+  <h2>Borrowed from Qubes OS</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Qubes OS idea</th><th>In scroll-secure</th><th>How close</th></tr>
+    <tr><td><strong>Anti Evil Maid:</strong> a TPM-sealed secret proves the boot wasn't tampered with</td><td>The disk key is sealed to PCR 7 plus a signed PCR 11 policy, and released only with the TPM2 PIN <em>and</em> a FIDO2 key. It's sealed again after boot.</td><td class="yes">Same goal, built in</td></tr>
+    <tr><td><strong>Hardware tokens, split secrets</strong></td><td>FIDO2 PIN + touch for both the disk and the lock screen. The TPM and the FIDO2 key each hold half.</td><td class="yes">Close</td></tr>
+    <tr><td><strong>Compartmentalization:</strong> one domain per risk</td><td>KVM/libvirt VMs with a virtual TPM and Secure Boot, for risky browsing, untrusted files and client work</td><td class="no">Workflow only. The host is trusted.</td></tr>
+    <tr><td><strong>USB isolation</strong> (<code>sys-usb</code>)</td><td>usbguard allowlisting, from secureblue</td><td class="no">Partial</td></tr>
+    <tr><td><strong>Disposable VMs, a separate network VM, a GUI domain with no network</strong></td><td>Not provided</td><td class="no">No</td></tr>
+  </table></div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>Side by side</h2>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>Qubes OS</th><th>scroll-secure</th></tr>
+    <tr><td>Isolation</td><td>Xen hypervisor with separate domains for network, USB and apps</td><td>One hardened Linux host, with KVM VMs on demand</td></tr>
+    <tr><td>Boot tamper detection</td><td>Anti Evil Maid, an optional add-on that depends on the hardware</td><td>Always on: TPM2 + FIDO2 sealed unlock</td></tr>
+    <tr><td>Secure Boot</td><td>Not officially supported</td><td>Required, with <a href="secure-boot-own-keys.html">your own keys</a>, no Microsoft CA</td></tr>
+    <tr><td>Disk unlock</td><td>Passphrase</td><td>TPM2 PIN + FIDO2 PIN + touch, passphrase as recovery</td></tr>
+    <tr><td>OS integrity</td><td>dom0 packages and templates</td><td>Signed, read-only composefs image with atomic updates and rollback</td></tr>
+    <tr><td>Graphics</td><td>No GPU acceleration in qubes</td><td>Native amdgpu or Intel, a scrollable tiling Wayland desktop</td></tr>
+    <tr><td>Hardware needs</td><td>VT-x/AMD-V and VT-d/IOMMU, a narrow compatibility list</td><td>TPM 2.0, UEFI with custom keys, a FIDO2 key with hmac-secret</td></tr>
+    <tr><td>Maturity</td><td>Over a decade in production, a large community and a public security track record</td><td>New and unaudited. <a href="threat-model.html">Help us change that.</a></td></tr>
+  </table></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Who should pick which</h2>
+  <p><strong>Pick Qubes OS</strong> if a compromised browser must not be able to reach your password manager, or if you face targeted attackers who will chain exploits. Compartmentalization at the hypervisor level is the only real answer to that, and Qubes does it best.</p>
+  <p><strong>Pick scroll-secure</strong> if you want a fast daily driver with a real GPU, and the threat you care most about is <em>physical</em>: a stolen or seized machine, or someone with ten minutes alone with it. Your boot chain, your keys and your disk unlock stay under your control.</p>
+  <p>And if you run Qubes OS today: the <a href="tpm2-fido2-luks-unlock.html">two-token unlock design</a> may still be worth a read.</p>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <p>scroll-secure is an independent project. It is not affiliated with or endorsed by the Qubes OS Project, Invisible Things Lab, Fedora, Red Hat or secureblue. Qubes OS is named only for comparison. This page loads no scripts, fonts or trackers.</p>
+</div></footer>
+</body>
+</html>
