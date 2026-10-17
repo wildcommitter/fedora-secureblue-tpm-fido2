@@ -245,13 +245,25 @@ clear
 cat << EOF
 Enter the details of your login account. It will be added to the wheel group.
 You should NOT choose a system username, like 'root' or 'admin'.
-Your password will be set to 'secureblue'. You must change it after logging in.
 
 EOF
 read -r -p "Username: " username
-# We use a hardcoded password because yescrypt isn't available here, only
-# SHA512, so the user will have to change it themselves after firstrun.
-password=$(openssl passwd -6 "secureblue")
+# scroll-secure: ask for the password instead of a well-known default (a public
+# ISO makes "secureblue" everyone's password until changed). Only SHA512 is
+# available here, not yescrypt; `passwd` after first login upgrades the hash.
+while :; do
+    read -r -s -p "Password (at least 12 characters): " user_pw && echo
+    read -r -s -p "Confirm: " user_pw2 && echo
+    if [[ "${user_pw}" != "${user_pw2}" ]]; then
+        echo "Passwords do not match."
+    elif [[ ${#user_pw} -lt 12 ]]; then
+        echo "Too short."
+    else
+        break
+    fi
+done
+password=$(printf '%s' "${user_pw}" | openssl passwd -6 -stdin)
+unset user_pw user_pw2
 last_changed=$(( $(date +%s) / 86400 ))
 echo "${username}:x:1000:1000:${username}:/var/home/${username}:/bin/bash" >> "${etc_dir}/passwd"
 echo "${username}:${password}:${last_changed}:0:99999:7:::" >> "${etc_dir}/shadow"
@@ -324,7 +336,7 @@ cat << EOF
 Installation is finished.
 
 Username: ${username}
-Password: secureblue
+Password: the one you chose
 
 EOF
 if [[ "${secure_boot}" == "1" ]]; then
