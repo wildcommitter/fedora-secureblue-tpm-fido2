@@ -12,7 +12,6 @@
 #         next to this script, i.e. image/uki/keys, which the image build
 #         embeds); private halves go to --secrets (default $SECRETS_DIR or
 #         ~/.local/share/scroll-secure/secrets). Keep the secrets offline.
-#         Same layout as create-keys.sh.
 #
 # enroll  Writes db, KEK, then PK into the firmware. Run as root on the
 #         installed system with the firmware in Setup Mode (firmware setup:

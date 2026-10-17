@@ -89,7 +89,7 @@ run0 tokenvault remove    # kill the vault keyslot, delete the vault
 
 Before the first enroll:
 
-- Enroll the Secure Boot keys (`enroll-secure-boot-keys`) and reboot, because PCR 7 must be
+- Enroll the Secure Boot keys (`run0 /usr/libexec/scroll-secure/secure-boot-keys enroll`) and reboot, because PCR 7 must be
   final.
 - With usbguard, allow the key first: `usbguard allow-device <n> -p`.
 
@@ -153,7 +153,7 @@ relabel it is **denied**, while an identical etc_t 0600 control file stays reada
 1. Install the image (`uki/install.sh`). Your LUKS passphrase becomes keyslot 0 and **stays
    as the recovery path**. `tokenvault` never removes it, and `remove` refuses to kill the
    last keyslot.
-2. Enroll the Secure Boot keys (`enroll-secure-boot-keys`). This changes PCR 7.
+2. Enroll the Secure Boot keys (`run0 /usr/libexec/scroll-secure/secure-boot-keys enroll`). This changes PCR 7.
 3. Reboot with Secure Boot on and check `bootctl status`.
 4. If usbguard is active, allow the FIDO2 key (`usbguard allow-device <n> -p`).
 5. Fill in `/etc/tokenvault/tokenvault.conf` (PINs) and run `run0 tokenvault enroll`.
