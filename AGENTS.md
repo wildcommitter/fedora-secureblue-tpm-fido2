@@ -28,7 +28,6 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
 | `test/bootc/` | tokenvault e2e and Secure Boot enrollment e2e on the sealed image |
-| `legacy/` | Old CachyOS versions. Reference only: not built, not shipped, don't extend |
 
 ## Hard rules
 
