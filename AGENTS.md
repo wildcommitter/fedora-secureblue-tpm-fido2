@@ -18,6 +18,11 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
   passphrase.
 - **Lock screen (hardened-unlock):** the FIDO2 key PIN plus a touch, then the account
   password.
+- **Duress canary:** a canary typed at any lock-screen prompt never unlocks. The locker
+  sends one byte to a socket-activated root helper (`duress-reset`, CAP_SYS_BOOT only),
+  which calls `reboot(2)` RESTART right away: no sync, no shutdown sequence. The hash is
+  in `/etc/hardened-unlock/duress` (yescrypt), and the check happens before PAM or the key
+  sees the answer.
 
 ## Layout
 
@@ -27,7 +32,7 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `image/files-luks/`, `image/LUKS.md` | tokenvault: dracut module + generator (initrd), `tokenvault` CLI, SELinux CIL (`tokenvault_conf_t`), tmpfiles |
 | `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
-| `test/bootc/` | tokenvault e2e and Secure Boot enrollment e2e on the sealed image |
+| `test/bootc/` | tokenvault e2e, Secure Boot enrollment e2e and the duress reset e2e on the sealed image |
 
 ## Hard rules
 
@@ -40,6 +45,10 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
   - no efivar writes on the host
 
   Read-only inspection is fine, for example the TPM event log or `status` commands.
+- **Never reboot, reset or power off the host.** The duress tests use the `duresstest`
+  build of the locker (its "reset" writes a marker file) in containers, and the real
+  reset only inside a VM (`test/bootc/duress-vm-e2e.py`). Never run `duress-reset` or
+  connect to a `duress.sock` on the host.
 - **Never pass the host TPM to a VM running stock OVMF.** It would extend the host's PCRs.
 - **Don't touch other people's VMs.** The libvirt VM `qubes-baremetal` (host TPM and USB
   passthrough) belongs to the user.
@@ -57,8 +66,8 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
   the FIDO2 PIN is the key's client PIN. The semantics are AND, never OR. Don't
   reintroduce separate passwords or derived keys.
 - **Don't change the security design without the user.** That covers the PCR policy (signed
-  PCR 11 + PCR 7 + PIN), the post-quantum vault layout, and dropping the Microsoft CA.
-  Propose instead.
+  PCR 11 + PCR 7 + PIN), the post-quantum vault layout, dropping the Microsoft CA, and
+  the duress semantics (hard reset, no unlock, no boot-time duress). Propose instead.
 
 ## Build
 
@@ -95,6 +104,8 @@ test/bootc/e2e.py [--cli-from-image] [scenario ...]    # tokenvault, 11 scenario
 test/bootc/sb-enroll-e2e.py                            # Secure Boot key enrollment from Setup Mode
 lockscreen/test/pam-e2e.sh                             # PAM stack with the virtual key (container)
 lockscreen/test/gui-e2e.sh                             # locker under headless scroll + wtype
+lockscreen/test/duress-e2e.sh                          # duress canary, duresstest build (marker, no reset)
+test/bootc/duress-vm-e2e.py --work <w>                 # the real duress hard reset, inside a VM
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
@@ -137,6 +148,13 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
 - **Option ROM hashes** come from the TPM event log (PCR 2, `EV_EFI_BOOT_SERVICES_DRIVER`).
   Without them in db, a discrete GPU has no display under our keys. Never drop them
   silently.
+- **The vfido gadget is one per host** (`/sys/kernel/config/usb_gadget/vfido`), and
+  `gadget.sh up` tears down an existing one. Parallel e2e runs must serialize on
+  `flock /var/tmp/vfido-gadget.lock` (duress-e2e.sh does). The lab registry in
+  `build-disk.sh` (port 5077) is one per host too.
+- **Duress reset vs `-no-reboot`:** the harness starts QEMU with `-no-reboot`, so a guest
+  reset ends QEMU. `duress-vm-e2e.py` boots with `no_reboot=False` to watch the reset and
+  the next boot on one serial log.
 
 ## Git
 

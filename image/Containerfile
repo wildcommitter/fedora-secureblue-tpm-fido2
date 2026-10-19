@@ -56,15 +56,20 @@ RUN export CFLAGS="$(rpm --eval '%{build_cflags}')" LDFLAGS="$(rpm --eval '%{bui
 FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS lockscreen-build
 
 RUN dnf -y install golang gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel \
-      gobject-introspection-devel pam-devel \
+      gobject-introspection-devel pam-devel libxcrypt-devel \
  && dnf clean all
 
 COPY --from=lockscreen go.mod go.sum /src/
 COPY --from=lockscreen cmd/ /src/cmd/
 COPY --from=lockscreen internal/ /src/internal/
+# duress-reset is the root-side helper of the duress canary: static, no cgo.
+# The production locker must not contain the duresstest hook.
 RUN --mount=type=cache,target=/root/go --mount=type=cache,target=/root/.cache/go-build \
     cd /src \
- && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath -o /out/usr/bin/ ./cmd/hardened-unlock
+ && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath -o /out/usr/bin/ ./cmd/hardened-unlock \
+ && GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 \
+      go build -trimpath -o /out/usr/libexec/hardened-unlock/ ./cmd/duress-reset \
+ && ! grep -q HARDENED_UNLOCK_DURESS_MARKER /out/usr/bin/hardened-unlock
 
 # ---------------------------------------------------------------------------
 # Stage 3: the bootable image.
@@ -114,6 +119,13 @@ COPY --from=lockscreen etc/pam.d/hardened-unlock /etc/pam.d/hardened-unlock
 COPY --from=lockscreen etc/scroll/config.d/ /etc/scroll/config.d/
 RUN sed -i 's|^# include /etc/scroll/config\.d/\*$|include /etc/scroll/config.d/*|' /etc/scroll/config \
  && grep -qx 'include /etc/scroll/config.d/\*' /etc/scroll/config
+
+# Duress canary: the socket-activated reset helper and its group. The canary
+# itself (/etc/hardened-unlock/duress) is set on the machine, never shipped.
+COPY --from=lockscreen usr/ /usr/
+RUN systemctl enable hardened-unlock-duress.socket \
+ && test -x /usr/libexec/hardened-unlock/duress-reset \
+ && ! test -e /etc/hardened-unlock/duress
 
 RUN systemctl enable \
       virtqemud.socket virtnetworkd.socket virtstoraged.socket \

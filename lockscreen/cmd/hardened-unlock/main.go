@@ -22,6 +22,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
+	"hardened-unlock/internal/duress"
 	"hardened-unlock/internal/pamauth"
 	"hardened-unlock/internal/sessionlock"
 )
@@ -103,6 +104,9 @@ func main() {
 		}
 		os.Exit(pamauth.RunHelper(service))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "duress" {
+		os.Exit(duressCLI(os.Args[2:]))
+	}
 
 	for _, arg := range os.Args[1:] {
 		switch arg {
@@ -110,7 +114,8 @@ func main() {
 			os.Exit(daemonize())
 		default:
 			fmt.Fprintf(os.Stderr, "usage: hardened-unlock [-f]\n"+
-				"  -f  return once the session is locked (for swayidle before-sleep)\n")
+				"  -f  return once the session is locked (for swayidle before-sleep)\n"+
+				"       hardened-unlock duress set|clear|status   (as root)\n")
 			os.Exit(2)
 		}
 	}
@@ -120,11 +125,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The canary is read once, before locking. A broken file must not stop
+	// the normal unlock: log it (never the hash) and lock without it.
+	canary, err := duress.Load(duress.File)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hardened-unlock:", err)
+	}
+
 	// Non-unique: a second locker (e.g. swayidle firing while already
 	// locked) runs on its own, is refused by the compositor and exits,
 	// instead of re-activating the first one over D-Bus.
 	app := gtk.NewApplication(applicationID, gio.ApplicationNonUnique)
-	ls := &lockScreen{app: app}
+	ls := &lockScreen{app: app, canary: canary}
 	app.ConnectActivate(func() { ls.onActivate() })
 	os.Exit(app.Run(os.Args[:1]))
 }
@@ -142,6 +154,9 @@ type lockScreen struct {
 	authInFlight bool
 	waiting      bool        // PAM is blocked on a prompt the user has to answer
 	answers      chan []byte // main loop -> auth goroutine, one per prompt
+
+	canary   *duress.Canary // nil: no duress canary set
+	duressed bool           // the canary was typed: never unlock again
 }
 
 func (ls *lockScreen) onActivate() {
@@ -218,7 +233,7 @@ func (ls *lockScreen) onWindowGone(win *gtk.Window) {
 func (ls *lockScreen) makeInteractive(win *gtk.Window) {
 	win.SetChild(ls.buildInteractivePanel())
 	ls.interactive = win
-	ls.entry.SetSensitive(!ls.authInFlight || ls.waiting)
+	ls.entry.SetSensitive((!ls.authInFlight || ls.waiting) && !ls.duressed)
 }
 
 func (ls *lockScreen) buildInteractivePanel() *gtk.Box {
@@ -300,6 +315,18 @@ func (ls *lockScreen) onEnter() {
 	text := []byte(ls.entry.Text())
 	ls.entry.SetText("")
 
+	// Every answer is checked against the canary before it can reach PAM
+	// or the key, at whichever prompt it is typed.
+	if ls.duressed {
+		zero(text)
+		return
+	}
+	if ls.canary.Match(text) {
+		zero(text)
+		ls.onDuress()
+		return
+	}
+
 	switch {
 	case !ls.authInFlight:
 		ls.authInFlight = true
@@ -315,6 +342,22 @@ func (ls *lockScreen) onEnter() {
 	default:
 		zero(text)
 	}
+}
+
+// onDuress keeps the session locked for good and asks for the hard reset.
+// The screen shows the same "Checking…" as a normal answer. If the reset
+// can't be requested, the session simply stays locked.
+func (ls *lockScreen) onDuress() {
+	ls.duressed = true
+	ls.waiting = false
+	ls.entry.SetSensitive(false)
+	ls.setStatus("Checking…", false)
+	debugf("canary matched")
+	go func() {
+		if err := duress.Trigger(); err != nil {
+			fmt.Fprintln(os.Stderr, "hardened-unlock:", err)
+		}
+	}()
 }
 
 // runAuthentication runs on its own goroutine; every UI change goes back to
@@ -337,6 +380,9 @@ func (ls *lockScreen) runAuthentication(typed []byte, answers chan []byte) {
 				zero(first)
 			}
 			glib.IdleAdd(func() {
+				if ls.duressed {
+					return
+				}
 				ls.setPrompt(prompt)
 				ls.setStatus("", false)
 				ls.waiting = true
@@ -355,6 +401,9 @@ func (ls *lockScreen) runAuthentication(typed []byte, answers chan []byte) {
 }
 
 func (ls *lockScreen) handleAuthResult(result pamauth.Result, err error) {
+	if ls.duressed {
+		return
+	}
 	ls.authInFlight = false
 	ls.waiting = false
 	ls.setPrompt(initialPrompt)
