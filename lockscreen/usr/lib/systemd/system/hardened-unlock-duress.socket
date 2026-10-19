@@ -1,0 +1,19 @@
+# The lock screen's duress canary: hardened-unlock connects here when the
+# canary is typed, and duress-reset hard-resets the machine. Only root and
+# the hardened-duress group (the workstation user, added by
+# `hardened-unlock duress set`) may connect.
+[Unit]
+Description=hardened-unlock duress reset socket
+Documentation=file:///usr/share/doc/hardened-unlock/README.md
+
+[Socket]
+ListenStream=/run/hardened-unlock/duress.sock
+SocketUser=root
+SocketGroup=hardened-duress
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

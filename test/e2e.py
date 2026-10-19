@@ -189,7 +189,9 @@ class Lab:
         return os.path.getsize(self.vf_log) if os.path.exists(self.vf_log) else 0
 
     # ---- VM ----------------------------------------------------------------
-    def boot(self, name, fido=True, tpm_dir=None):
+    def boot(self, name, fido=True, tpm_dir=None, no_reboot=True):
+        """no_reboot=False keeps QEMU running across a guest reset (the
+        duress e2e watches the reset and the next boot on one serial log)."""
         self.boot_no += 1
         if not os.path.exists(self.vars):
             shutil.copy(self.vars_template, self.vars)
@@ -222,8 +224,9 @@ class Lab:
                "-device", "qemu-xhci,id=xhci",
                "-vga", self.vga, "-display", "none",
                "-serial", f"unix:{ser_path},server=on,wait=off",
-               "-monitor", f"unix:{self.mon_path},server=on,wait=off",
-               "-no-reboot"]
+               "-monitor", f"unix:{self.mon_path},server=on,wait=off"]
+        if no_reboot:
+            cmd.append("-no-reboot")
         if fido:
             cmd += ["-device", f"usb-host,bus=xhci.0,vendorid={VID},productid={PID}"]
         cmd += self.extra_qemu_tail

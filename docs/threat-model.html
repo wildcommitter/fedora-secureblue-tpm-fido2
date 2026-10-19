@@ -48,6 +48,7 @@
     <tr><td><strong>Root on the running system asking the TPM for the disk key</strong></td><td>PCR 11 is extended when the initramfs ends, so the policy can't be satisfied again until reboot.</td></tr>
     <tr><td><strong>A confined system service reading the PIN config</strong></td><td>The SELinux type <code>tokenvault_conf_t</code>. Tested: NetworkManager is denied.</td></tr>
     <tr><td><strong>Walking up to an unlocked, idle session</strong></td><td>It auto-locks after 5 minutes and before suspend. Unlocking needs the key, the PIN, a touch and the password. A crashed locker leaves the session locked.</td></tr>
+    <tr><td><strong>Being forced to unlock the lock screen</strong></td><td>The duress canary: typed at any prompt, it hard-resets the machine instead of unlocking, without touching the key or PAM. Limits under "Not stopped".</td></tr>
   </table></div>
 </div></section>
 
@@ -59,7 +60,7 @@
     <li><strong>Downgrade to an older signed kernel.</strong> The signed PCR 11 policy accepts <em>any</em> UKI signed with your PCR key, including old ones with known bugs. Rotating the PCR key retires them, and re-enrollment is required.</li>
     <li><strong>Firmware-level implants, malicious firmware updates, and the Intel ME / AMD PSP.</strong> These sit below Secure Boot.</li>
     <li><strong>Escaping a VM.</strong> KVM shares the host kernel. This isn't Xen-grade isolation; see <a href="qubes-os-alternative.html">vs Qubes OS</a>.</li>
-    <li><strong>Coercion.</strong> If someone can make you type the PINs and touch the key, they get in.</li>
+    <li><strong>Coercion.</strong> If someone can make you type the PINs and touch the key, they get in. At the lock screen you can type the <strong>duress canary</strong> instead. It never unlocks: the machine hard-resets at once (no shutdown sequence), and the disk is back behind the TPM PIN, the key PIN and a touch. It doesn't help against someone who knows about the canary or watched you set it, against coercion at boot (there is no boot-time duress PIN), or against a copy taken before you're asked. Any process running as you can trigger the reset. <strong>RAM isn't wiped:</strong> the LUKS volume key is in memory while the system runs, and the reset doesn't erase it. The kernel is built without <code>CONFIG_RESET_ATTACK_MITIGATION</code> and nothing sets the firmware's memory-overwrite request (in the VM: <code>MemoryOverwriteRequestControl</code> present, value 0). So someone who can read RAM right after the reset (a cold-boot attack) may recover the key. Secure Boot with your keys only stops booting their own tools, not moving the DIMMs.</li>
     <li><strong>The headless remote session.</strong> VNC has no password. It listens on a Unix socket in the user's runtime directory (mode 0700), so other local users can't reach it, but any process running as the user can. It is meant to be reached over SSH, and it doesn't idle-lock.</li>
   </ul>
 </div></section>

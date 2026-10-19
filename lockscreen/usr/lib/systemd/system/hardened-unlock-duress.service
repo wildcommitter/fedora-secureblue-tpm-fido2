@@ -1,0 +1,41 @@
+# Hard reset on the lock screen's duress canary: reboot(2) RESTART, no sync,
+# no shutdown sequence. CAP_SYS_BOOT is the only capability, everything else
+# is sandboxed away. Started by hardened-unlock-duress.socket.
+[Unit]
+Description=hardened-unlock duress reset helper
+Requires=hardened-unlock-duress.socket
+After=hardened-unlock-duress.socket
+
+[Service]
+ExecStart=/usr/libexec/hardened-unlock/duress-reset
+DynamicUser=yes
+AmbientCapabilities=CAP_SYS_BOOT
+CapabilityBoundingSet=CAP_SYS_BOOT
+NoNewPrivileges=yes
+SystemCallFilter=@system-service reboot
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+PrivateNetwork=yes
+IPAddressDeny=any
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateTmp=yes
+PrivateIPC=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
