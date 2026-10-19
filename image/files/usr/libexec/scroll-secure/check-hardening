@@ -1,0 +1,42 @@
+#!/usr/bin/bash
+# Check that an ELF executable carries Fedora's hardening: PIE, full RELRO
+# (GNU_RELRO + BIND_NOW), stack protector, FORTIFY and CET (IBT + SHSTK).
+#
+#   check-hardening <elf>...     exit 0 = all present, 1 = something missing
+set -euo pipefail
+
+die() { echo "check-hardening: $*" >&2; exit 1; }
+[[ $# -gt 0 ]] || die "usage: check-hardening <elf>..."
+
+missing=0
+check() { # check <elf> <what> <command...>
+    local elf=$1 what=$2
+    shift 2
+    if "$@"; then
+        echo "  ok   $what"
+    else
+        echo "  MISSING $what"
+        missing=1
+    fi
+}
+# here-strings, not pipes: grep -q would SIGPIPE the writer under pipefail
+has() { grep -Eq -- "$1" <<< "$2"; }
+
+for elf in "$@"; do
+    [[ -f $elf ]] || die "$elf: not a file"
+    echo "$elf"
+    header=$(readelf -hW "$elf")
+    segments=$(readelf -lW "$elf")
+    dynamic=$(readelf -dW "$elf")
+    dynsyms=$(readelf --dyn-syms -W "$elf")
+    notes=$(readelf -nW "$elf" 2>/dev/null)
+    check "$elf" "PIE"        has 'Type:[[:space:]]+DYN' "$header"
+    check "$elf" "PIE flag"   has 'FLAGS_1.*PIE' "$dynamic"
+    check "$elf" "GNU_RELRO"  has 'GNU_RELRO' "$segments"
+    check "$elf" "BIND_NOW"   has 'BIND_NOW|FLAGS_1.*NOW' "$dynamic"
+    check "$elf" "stack protector" has '__stack_chk_fail' "$dynsyms"
+    check "$elf" "FORTIFY"    has '__[a-z_]+_chk@' "$dynsyms"
+    check "$elf" "CET IBT"    has 'x86 feature:.*IBT' "$notes"
+    check "$elf" "CET SHSTK"  has 'x86 feature:.*SHSTK' "$notes"
+done
+[[ $missing -eq 0 ]] || die "hardening properties missing"

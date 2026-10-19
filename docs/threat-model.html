@@ -60,7 +60,7 @@
     <li><strong>Firmware-level implants, malicious firmware updates, and the Intel ME / AMD PSP.</strong> These sit below Secure Boot.</li>
     <li><strong>Escaping a VM.</strong> KVM shares the host kernel. This isn't Xen-grade isolation; see <a href="qubes-os-alternative.html">vs Qubes OS</a>.</li>
     <li><strong>Coercion.</strong> If someone can make you type the PINs and touch the key, they get in.</li>
-    <li><strong>The headless remote session.</strong> VNC has no password: it listens only on loopback and is meant to be reached over SSH. Any local process on the host can connect to it, and it doesn't idle-lock.</li>
+    <li><strong>The headless remote session.</strong> VNC has no password. It listens on a Unix socket in the user's runtime directory (mode 0700), so other local users can't reach it, but any process running as the user can. It is meant to be reached over SSH, and it doesn't idle-lock.</li>
   </ul>
 </div></section>
 

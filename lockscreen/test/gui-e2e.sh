@@ -5,10 +5,15 @@
 #
 #   lockscreen/build.sh && lockscreen/test/gui-e2e.sh     (needs sudo for the USB gadget)
 #
-# Checks: -f returns once the session is locked; typing the key PIN, touching
-# (auto) and typing the password unlocks; a wrong PIN keeps it locked; after
-# the locker is killed the session stays locked and a new locker can take
-# over and unlock it.
+# Locking goes the real way: scroll-lock signals scroll, which starts
+# lock_command (hardened-unlock -f) as a privileged client.
+#
+# Checks: scroll-lock returns once the session is locked; typing the key PIN,
+# touching (auto) and typing the password unlocks; a wrong PIN keeps it locked;
+# after the locker is killed the session stays locked and a new locker can take
+# over and unlock it. On a second scroll with the default `privileged_clients
+# spawned`: a locker started directly gets no session lock, grim and wtype get
+# no capture or virtual keyboard, and scroll-lock still locks.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -54,6 +59,7 @@ podman run -d --init --name "$CT" --device "$hidraw:/dev/hidraw0" \
     --cap-add DAC_READ_SEARCH,AUDIT_WRITE \
     -v "$LS/out:/hutest/bin:ro,Z" -v "$LS/etc/pam.d/hardened-unlock:/hutest/pam:ro,Z" \
     -v "$HERE/pty-pin.py:/hutest/pty-pin.py:ro,Z" -v "$HERE/scroll-test.conf:/hutest/scroll.conf:ro,Z" \
+    -v "$HERE/scroll-test-default.conf:/hutest/scroll-default.conf:ro,Z" \
     -v "$W:/hutest/work:Z" \
     --entrypoint sleep "$TEST_IMAGE" infinity >/dev/null
 ct() { podman exec -i "$CT" "$@"; }
@@ -66,7 +72,7 @@ FIDO2_PIN=$KEY_PIN python3 -I /usr/libexec/tokenvault/fido2-pin.py ensure /dev/h
 python3 -I /hutest/pty-pin.py '$KEY_PIN' pamu2fcfg -u tester -o pam://workstation -i pam://workstation -N \
     | tr -d '\r' | grep '^tester:' > /etc/u2f_mappings
 chmod 0644 /etc/u2f_mappings
-install -d -m 0700 -o tester -g tester /run/user/tester
+install -d -m 0700 -o tester -g tester /run/user/tester /run/user/tester2
 "
 # The session: dbus + headless scroll as the test user.
 ENV=(XDG_RUNTIME_DIR=/run/user/tester WLR_BACKENDS=headless WLR_RENDERER=pixman
@@ -80,7 +86,8 @@ for _ in $(seq 1 40); do
 done
 sock=$(ct sh -c 'cd /run/user/tester && ls wayland-* 2>/dev/null' | grep -v '\.lock$' | head -1 || true)
 [[ -n $sock ]] || { echo "scroll did not start"; cat "$W/scroll.log"; exit 1; }
-ENV+=(WAYLAND_DISPLAY=$sock DBUS_SESSION_BUS_ADDRESS=disabled:)
+spid=$(ct pgrep -u tester -x scroll | head -1)
+ENV+=(WAYLAND_DISPLAY=$sock DBUS_SESSION_BUS_ADDRESS=disabled: SCROLL_PID=$spid)
 
 pass=0 fail=0
 ok()  { echo "PASS $1"; pass=$((pass + 1)); }
@@ -96,17 +103,19 @@ wait_log() {
     return 1
 }
 locker_running() { ct pgrep -u tester -x hardened-unlock >/dev/null; }
+# scroll-lock: SIGUSR1 to scroll, which starts lock_command (scroll-test.conf)
+# as a privileged client; returns 0 once the session is locked.
 start_locker() {
     : > "$W/locker.log"; chmod 0666 "$W/locker.log"
-    as_tester sh -c "/hutest/bin/hardened-unlock -f </dev/null >/dev/null 2>>$LOG"
+    as_tester scroll-lock </dev/null >/dev/null && wait_log '^hardened-unlock: locked$' 10
 }
 # One wtype call per answer: each call is a new virtual keyboard, and keys sent
 # before the client has applied its keymap are lost, hence the pause first.
 type_text() { as_tester wtype -s 300 -d 20 "$1" -k Return; }
 
-# 1. -f returns 0 only once the compositor confirmed the lock
-if start_locker && grep -q '^hardened-unlock: locked$' "$W/locker.log" && locker_running; then
-    ok "lock (-f returned after the locked event)"
+# 1. scroll-lock returns 0 only once the session is locked
+if start_locker && locker_running && ct test -e "/run/user/tester/scroll-locked.$spid"; then
+    ok "lock (scroll-lock returned once locked; state file present)"
 else
     bad "lock"; cat "$W/locker.log"
 fi
@@ -159,6 +168,45 @@ fi
 tail -n +"$((mark + 1))" "$W/vfido.log" | grep -q 'up=granted' && ok "the key was touched" || bad "no touch seen by the key"
 grep -q 'answered with the text typed before Enter' "$W/locker.log" && ok "PIN typed before Enter answered the PIN prompt" \
     || bad "pre-typed PIN not used"
+
+# 5. A second scroll with the default `privileged_clients spawned`
+ENV2=(XDG_RUNTIME_DIR=/run/user/tester2 WLR_BACKENDS=headless WLR_RENDERER=pixman
+      WLR_LIBINPUT_NO_DEVICES=1 GSK_RENDERER=cairo HARDENED_UNLOCK_DEBUG=1 USER=tester)
+podman exec -d "$CT" runuser -u tester -- env "${ENV2[@]}" sh -c \
+    'exec dbus-run-session -- scroll -c /hutest/scroll-default.conf > /hutest/work/scroll2.log 2>&1'
+sock2=
+for _ in $(seq 1 40); do
+    sock2=$(ct sh -c 'cd /run/user/tester2 && ls wayland-* 2>/dev/null' | grep -v '\.lock$' | head -1 || true)
+    [[ -n $sock2 ]] && break
+    sleep 0.25
+done
+spid2=$(ct pgrep -u tester -x scroll | grep -vx "$spid" | head -1 || true)
+if [[ -z $sock2 || -z $spid2 ]]; then
+    bad "second scroll did not start"; cat "$W/scroll2.log"
+else
+    ENV2+=(WAYLAND_DISPLAY=$sock2 DBUS_SESSION_BUS_ADDRESS=disabled: SCROLL_PID=$spid2)
+    as2() { ct runuser -u tester -- env "${ENV2[@]}" "$@"; }
+    : > "$W/locker2.log"; chmod 0666 "$W/locker2.log"
+    # A locker this test starts itself is a plain client: no session-lock global.
+    if as2 sh -c 'timeout 15 /hutest/bin/hardened-unlock -f </dev/null >/dev/null 2>>/hutest/work/locker2.log'; then
+        bad "a locker started by a plain client got the session lock"
+    elif ct test -e "/run/user/tester2/scroll-locked.$spid2"; then
+        bad "session locked by a plain client"
+    else
+        ok "a locker started directly (plain client) can't lock"
+    fi
+    as2 grim /hutest/work/plain-grim.png 2>/dev/null && bad "grim captured the screen as a plain client" \
+        || ok "grim (screencopy) denied to a plain client"
+    as2 wtype -s 300 x 2>/dev/null && bad "wtype typed as a plain client" \
+        || ok "wtype (virtual keyboard) denied to a plain client"
+    : > "$W/locker2.log"
+    if as2 scroll-lock </dev/null && ct test -e "/run/user/tester2/scroll-locked.$spid2" \
+            && grep -q '^hardened-unlock: locked$' "$W/locker2.log"; then
+        ok "scroll-lock locks with the default spawned mode"
+    else
+        bad "scroll-lock with the default spawned mode"; cat "$W/locker2.log"
+    fi
+fi
 
 echo "passed $pass, failed $fail (logs and screenshot in $W)"
 [[ $fail -eq 0 ]]

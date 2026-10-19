@@ -63,7 +63,7 @@
     <div class="card"><h3>Hardware lock screen</h3><p>A GTK4 <code>ext-session-lock</code> locker: FIDO2 PIN plus touch, then your password. If the locker crashes, the session stays locked. Without the key, the password prompt never appears.</p></div>
     <div class="card"><h3>Compartments on KVM</h3><p>libvirt with a virtual TPM and Secure Boot in the guests. Do risky work in a VM, Qubes-style, with your desktop still native and GPU-fast.</p></div>
     <div class="card"><h3>Atomic, signed updates</h3><p>One container image, cosign-verified on install. <code>bootc upgrade</code> swaps in a newly signed UKI, with rollback from the boot menu.</p></div>
-    <div class="card"><h3>Remote desktop, no GPU needed</h3><p>A software-rendered (pixman) headless scroll session with wayvnc, listening on loopback only and reached over SSH.</p></div>
+    <div class="card"><h3>Remote desktop, no GPU needed</h3><p>A software-rendered (pixman) headless scroll session with wayvnc, listening on a Unix socket in the user's private runtime directory and reached over SSH.</p></div>
   </div>
 </div></section>
 

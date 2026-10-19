@@ -125,6 +125,15 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
 - **ext-session-lock:** a locker must round-trip the unlock (`display.Sync()`) before
   exiting, or the compositor treats it as crashed and stays locked (scroll's red screen).
   `::unlocked` fires synchronously inside `Unlock()`.
+- **Privileged protocols** (our scroll fork): only clients scroll starts itself
+  (`exec_privileged`, `lock_command`) get session-lock, screencopy, virtual input,
+  layer-shell and the like. A locker or wtype/grim run by hand gets no such global. Lab
+  configs set `privileged_clients all`; never put that in the image.
+- **WAYLAND_SOCKET** is one connection, consumed by the first `wl_display_connect`. A
+  privileged process that re-execs (`hardened-unlock -f`) must pass the fd on itself;
+  Go's `exec.Command` only passes `ExtraFiles`.
+- **Hardening flags:** plain `meson setup` uses none of Fedora's (no PIE, RELRO, FORTIFY,
+  CET). Export `%{build_cflags}`/`%{build_ldflags}` and pass `-Db_pie=true`.
 - **Option ROM hashes** come from the TPM event log (PCR 2, `EV_EFI_BOOT_SERVICES_DRIVER`).
   Without them in db, a discrete GPU has no display under our keys. Never drop them
   silently.

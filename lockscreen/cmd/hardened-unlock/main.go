@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -407,6 +408,18 @@ func daemonize() int {
 	cmd := exec.Command(exe)
 	cmd.Env = append(os.Environ(), readyFdEnv+"=3")
 	cmd.ExtraFiles = []*os.File{w}
+	// scroll starts the locker on a connection of its own (WAYLAND_SOCKET): the
+	// only one that gets the session-lock protocol. exec passes only ExtraFiles,
+	// so hand that fd on to the child, which is the one that connects.
+	if s := os.Getenv("WAYLAND_SOCKET"); s != "" {
+		fd, err := strconv.Atoi(s)
+		if err != nil || fd < 0 {
+			fmt.Fprintln(os.Stderr, "hardened-unlock: bad WAYLAND_SOCKET")
+			return 1
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, os.NewFile(uintptr(fd), "wayland"))
+		cmd.Env = append(cmd.Env, "WAYLAND_SOCKET=4") // the last value of a key wins
+	}
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

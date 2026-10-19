@@ -1,9 +1,23 @@
 [Unit]
-Description=Headless scroll session (pixman) exported via wayvnc on 127.0.0.1:5900
+Description=Headless scroll session (pixman) exported via wayvnc on a Unix socket (/run/user/<uid>/wayvnc.sock)
 
 [Service]
 ExecStart=/usr/libexec/scroll-headless
 Restart=on-failure
+
+# Sandboxing. Everything started in the session inherits it, so it stops at what
+# a desktop session can live without:
+# - no setuid gains: sudo/pkexec fail here, use run0
+# - no ptrace/perf (@debug): gdb/strace don't work in this session
+# - @mount stays allowed, because podman, flatpak and bwrap need it in user namespaces
+# - no MemoryDenyWriteExecute: it would break JITs (browsers, Mesa's llvmpipe)
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+UMask=0077
 
 [Install]
 WantedBy=default.target
