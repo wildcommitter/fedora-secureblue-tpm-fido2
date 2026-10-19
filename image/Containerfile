@@ -14,40 +14,35 @@ ARG BASE_IMAGE=ghcr.io/secureblue/sericea-main-hardened
 ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a32c48ebf
 
 # ---------------------------------------------------------------------------
-# Stage 1: build scroll from our fork (wildcommitter/scroll, branch `hardening`;
-# see its FORK.md). Its patched wlroots is an in-tree subproject and is linked
-# statically, so only scroll's own files reach the final image.
+# Stage 1: build scroll from our fork (wildcommitter/scroll, see its FORK.md) as a
+# local RPM, `--with hardened`, from a pinned, annotated tag. Never from CI
+# artifacts or releases: the source is the pinned checkout, built here.
 #
-# - Fedora's distro flags (PIE, full RELRO, stack protector, FORTIFY, CET): plain
-#   meson builds without them, and the stock build had none of them.
-# - No Lua, no IPC socket, no scrollbar, no Xwayland, no Vulkan or X11 backend.
-# - TODO(sandbox): add -Dsandbox=true (exec broker + seccomp + Landlock in the
-#   compositor, see FORK.md) once the fork has it. Without it, the build fails.
+# The hardened profile has no Lua, IPC socket, scrollbar, Xwayland, Vulkan or X11
+# backend, and has the sandbox (exec broker, seccomp, Landlock). %meson brings
+# Fedora's hardening flags, and the spec's %check fails the build without them
+# (check-hardening runs again in stage 3). Its wlroots is linked statically.
 # ---------------------------------------------------------------------------
 FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
 
 ARG SCROLL_REPO=https://github.com/wildcommitter/scroll
-ARG SCROLL_REF=hardening
-ARG SCROLL_COMMIT=dcaba3b69e9dae91fc506399ac5833e76c35517c
+ARG SCROLL_REF=scroll-secure-20261019
+ARG SCROLL_COMMIT=7c81a4373246ac89e92d5c62a9171581b5e8e3f4
 
-RUN dnf -y install git meson ninja-build gcc redhat-rpm-config readline-devel scdoc \
-      'dnf5-command(builddep)' \
- && dnf -y builddep wlroots sway \
- && dnf clean all
+RUN dnf -y install git rpm-build 'dnf5-command(builddep)' && dnf clean all
 
-RUN git clone --depth 1 --branch "${SCROLL_REF}" "${SCROLL_REPO}" /src \
+# Full history: make-srpm.sh takes version and snapshot date from git.
+RUN git clone --branch "${SCROLL_REF}" "${SCROLL_REPO}" /src \
+ && test "$(git -C /src rev-parse "refs/tags/${SCROLL_REF}^{commit}")" = "${SCROLL_COMMIT}" \
  && test "$(git -C /src rev-parse HEAD)" = "${SCROLL_COMMIT}"
 
-RUN export CFLAGS="$(rpm --eval '%{build_cflags}')" LDFLAGS="$(rpm --eval '%{build_ldflags}')" \
- && meson setup /build /src \
-      --prefix=/usr --sysconfdir=/etc --buildtype=release \
-      -Db_ndebug=true -Db_pie=true -Dwerror=false -Ddefault-wallpaper=false \
-      -Dlua=disabled -Dipc=false -Dscrollbar=false \
-      -Dwlroots:default_library=static -Dwlroots:examples=false \
-      -Dwlroots:xwayland=disabled -Dwlroots:renderers=gles2 \
-      -Dwlroots:backends=drm,libinput \
- && meson compile -C /build \
- && DESTDIR=/out meson install -C /build --skip-subprojects
+RUN srpm=$(cd /src && packaging/make-srpm.sh -o /tmp/srpm) \
+ && dnf -y builddep --define 'with_hardened 1' "$srpm" \
+ && rpmbuild --rebuild --with hardened "$srpm" \
+ && mkdir -p /out \
+ && cp ~/rpmbuild/RPMS/x86_64/scroll-[0-9]*.hardened.fc*.x86_64.rpm /out/ \
+ && test "$(ls /out | wc -l)" = 1 \
+ && ls /out/scroll-[0-9]*.hardened.fc*.x86_64.rpm
 
 # ---------------------------------------------------------------------------
 # Stage 2: build hardened-unlock (../lockscreen, passed by build.sh as the
@@ -71,11 +66,17 @@ RUN --mount=type=cache,target=/root/go --mount=type=cache,target=/root/.cache/go
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
 
-COPY --from=scroll-build /out/ /
 COPY --from=lockscreen-build /out/ /
 
-# - scroll's runtime libs (static wlroots aside) come with sway in the base. It's built
-#   without Lua; liblua still loads through libinput.
+# scroll: the local RPM from stage 1 (bind-mounted, so the file doesn't stay in the
+# image), no weak deps. /var is a tmpfs for the same reason as below.
+RUN --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
+    --mount=type=tmpfs,target=/var \
+    dnf -y install --setopt=install_weak_deps=False /tmp/scroll-rpm/scroll-[0-9]*.rpm \
+ && dnf clean all \
+ && rpm -q scroll | grep -q '\.hardened\.' \
+ && scroll -v | grep -q packaged
+
 # - libvirt modular daemons + swtpm/OVMF: VMs with vTPM and Secure Boot (also the
 #   tokenvault e2e lab).
 # - pam-u2f/pamu2fcfg/fido2-tools/tpm2-tools: lock screen + LUKS token enrollment.
@@ -101,8 +102,18 @@ RUN /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
 # scroll is built without IPC, so the stock config's `bar {}` (scrollbar needs IPC)
 # can't work: delete the block. The sessions read only /etc/scroll/config, so a
 # process running as the user can't plant `exec` lines in ~/.config/scroll/config.
+# The stock $term (kitty) and $menu (wmenu-run) aren't in the image: use foot and
+# rofi. rofi is a layer-shell client, which our scroll gives only to clients it
+# starts itself, so the launcher binding uses exec_privileged.
 RUN sed -i '/^bar {$/,/^}$/d' /etc/scroll/config \
  && ! grep -q '^bar {' /etc/scroll/config \
+ && sed -i -e 's|^set \$term kitty$|set $term foot|' \
+      -e 's|^set \$menu wmenu-run$|set $menu rofi -show drun|' \
+      -e 's|^\([[:space:]]*bindsym \$mod+r\) exec \$menu$|\1 exec_privileged $menu|' \
+      /etc/scroll/config \
+ && grep -qx 'set $term foot' /etc/scroll/config \
+ && grep -qx 'set $menu rofi -show drun' /etc/scroll/config \
+ && grep -qE '^[[:space:]]*bindsym \$mod\+r exec_privileged \$menu$' /etc/scroll/config \
  && sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
       /usr/share/wayland-sessions/scroll.desktop \
  && grep -qx 'Exec=scroll -c /etc/scroll/config' /usr/share/wayland-sessions/scroll.desktop

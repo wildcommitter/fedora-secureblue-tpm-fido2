@@ -241,9 +241,10 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
 - Base: `podman manifest inspect ghcr.io/secureblue/sericea-main-hardened:latest`, take
   the index digest, and update `BASE_DIGEST` and `FEDORA_VERSION` together (from the
   `org.opencontainers.image.version` label).
-- scroll: rebase the fork's `hardening` branch onto upstream (see its `FORK.md`), then
-  `git ls-remote https://github.com/wildcommitter/scroll refs/heads/hardening` and update
-  `SCROLL_COMMIT`.
+- scroll: rebase the fork's `hardening` branch onto upstream (see its `FORK.md`) and tag the
+  commit (`scroll-secure-YYYYMMDD`, annotated). Then set `SCROLL_REF` to the tag and
+  `SCROLL_COMMIT` to its commit. The build fails if the tag doesn't resolve to that commit.
+  The RPM is built from that checkout; never from CI artifacts or releases.
 - `uki/`: re-vendor from secureblue, re-apply the `scroll-secure:` changes and update
   `uki/VENDORED`. secureblue moves fast here.
 
@@ -254,8 +255,20 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
   session file doesn't pin `-c /etc/scroll/config`, the config.d include isn't enabled, or
   a tokenvault CLI dependency is missing.
 - `uki/Containerfile.base` runs `bootc container lint --fatal-warnings`.
+- The scroll RPM's `%check` fails without the hardening flags. The rootfs checks that
+  `rpm -q scroll` is the `.hardened` build and that `scroll -v` says `packaged`.
 - `build.sh` finally runs `tokenvault/check-uki` on the signed UKI: sections, PCR
-  signature, and the initrd's tokenvault files, binaries, dracut modules and kmods.
+  signature, and the initrd's tokenvault files, binaries, dracut modules and kmods. Then
+  it runs `sbverify` against `uki/keys/db/db.pem` on systemd-boot and the UKI. The signing
+  stages are built with `--no-cache`, because podman's cache ignores secret contents and
+  would reuse a layer signed with other keys.
+- Desktop smoke (`test/bootc/desktop-smoke.py`: KVM, Secure Boot, virtio GPU with two
+  outputs, SDDM autologin as a real user) passes 20/20. It covers the session path, the
+  sandbox (seccomp, Landlock, NoNewPrivs) with gles2, output and USB keyboard hotplug,
+  reload, cursor theme, title-bar text, foot by binding, swayidle → scroll-lock → locker,
+  wayvnc over the Unix socket, plain clients denied grim and the session lock, and no
+  Landlock denials. The cursor-theme check reads the log only: QEMU's screendump has no
+  cursor plane.
 - tokenvault e2e (`test/bootc`, KVM + OVMF Secure Boot custom mode + swtpm + virtual
   FIDO2) passes all 11 scenarios on the dev-key build, including `selinux`: the
   `tokenvault_conf_t` module denies confined domains, e.g. NetworkManager_t, read access
@@ -282,10 +295,11 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
 
 | Layer | What | Cost |
 |---|---|---|
-| Build | Fedora's `%{build_cflags}`/`%{build_ldflags}` and `-Db_pie=true`: PIE, full RELRO, stack protector, FORTIFY, CET. Checked by `check-hardening` | none |
-| Build | `-Dlua=disabled -Dipc=false -Dscrollbar=false`: no Lua, no IPC socket | no scrollmsg, scrollbar, waybar or Lua scripts; the stock `bar {}` block is removed |
-| Build | `-Dwlroots:xwayland=disabled -Dwlroots:renderers=gles2 -Dwlroots:backends=drm,libinput` | no X11 apps in scroll, no Vulkan renderer. The Xwayland package stays: sway, sddm and the base require it |
-| Build | `-Dsandbox=true`: exec broker, seccomp and Landlock in the compositor (fork `FORK.md`) | |
+| Build | A local RPM from the fork's `packaging/scroll.spec`, `--with hardened`. `%meson` brings Fedora's flags: PIE, full RELRO, stack protector, FORTIFY, CET. Checked by the spec's `%check` and again by `check-hardening` | none |
+| Build | hardened profile: no Lua, IPC socket or scrollbar | no scrollmsg, scrollbar, waybar or Lua scripts; the stock `bar {}` block is removed |
+| Build | hardened profile: wlroots without Xwayland, the Vulkan renderer or the X11 backend | no X11 apps in scroll. The Xwayland package stays: sway, sddm and the base require it |
+| Build | hardened profile: sandbox (exec broker, seccomp and Landlock in the compositor, fork `FORK.md`) | includes, background images and `xkb_file` must be under `/etc` or the config dir. No realtime scheduling: our scroll has no `cap_sys_nice`, unlike Fedora's sway |
+| Config | `$term` is foot and `$menu` is `rofi -show drun`, started with `exec_privileged` (layer-shell). The stock kitty and wmenu aren't in the image | |
 | Protocols | Only clients scroll starts itself (`exec_privileged`, `lock_command`, swaybg, swaynag) get capture, clipboard control, virtual input, input method, session lock, layer shell and the other privileged protocols | screen sharing, clipboard managers, launchers and notification daemons need `exec_privileged` in `/etc/scroll/config.d/` |
 | Lock | `lock_command hardened-unlock -f`, `bindsym $mod+Alt+l lock`, swayidle runs `scroll-lock` | a locker started any other way can't lock |
 | Session | Sessions read only `/etc/scroll/config`. SDDM starts them through `wayland-session`, which doesn't source `~/.profile` or `/etc/profile` and unsets `LD_PRELOAD` and similar | no per-user scroll config; session env from your shell profile isn't applied |

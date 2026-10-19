@@ -28,6 +28,10 @@ TEST_IMAGE=${TEST_IMAGE:-localhost/hardened-unlock-guitest:latest}
 [[ -x $LS/out/hardened-unlock ]] || { echo "run lockscreen/build.sh first" >&2; exit 1; }
 podman build -q --build-arg IMAGE="$IMAGE" -t "$TEST_IMAGE" -f "$HERE/Containerfile.gui" "$HERE" >/dev/null
 
+# The USB gadget is one per host: wait for other e2e runs to release it.
+exec 9>/var/tmp/vfido-gadget.lock
+flock -w 1800 9 || { echo "vfido gadget busy" >&2; exit 1; }
+
 rm -rf "$W"; mkdir -p "$W/ctl"; chmod 0777 "$W"   # written by the container's test user
 VF= CT=${CT_NAME:-hardened-unlock-guitest}
 cleanup() {
