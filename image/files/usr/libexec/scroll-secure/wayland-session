@@ -1,0 +1,36 @@
+#!/usr/bin/sh
+# SDDM SessionCommand for Wayland sessions (replaces
+# /usr/share/sddm/scripts/wayland-session).
+#
+#   wayland-session '<Exec line of the .desktop file>'
+#
+# SDDM's stock script runs a login shell, or sources /etc/profile and ~/.profile,
+# before it starts the compositor. Those run code that the user's files control
+# (~/.profile, ~/.bash_profile, ~/.i18n through /etc/profile.d/lang.sh). So a
+# process running as the user could make the next session start something else,
+# or inject into the compositor with LD_PRELOAD. This script sources nothing from
+# the user and starts the session with a fixed environment.
+set -eu
+
+die() { echo "wayland-session: $*" >&2; exit 1; }
+[ $# -ge 1 ] || die "usage: wayland-session <command>"
+
+# Dynamic-loader and interpreter hooks the compositor must not inherit.
+unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH LD_DEBUG LD_PROFILE GCONV_PATH \
+      MALLOC_CHECK_ GLIBC_TUNABLES ENV BASH_ENV PYTHONPATH PYTHONSTARTUP \
+      PERL5LIB PERL5OPT RUBYOPT NODE_OPTIONS
+
+export PATH=/usr/local/bin:/usr/bin
+# What /etc/profile.d/flatpak.sh would add, for apps installed with flatpak.
+export XDG_DATA_DIRS="${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share"
+if [ -r /etc/locale.conf ]; then
+    # root-owned, assignments only
+    . /etc/locale.conf
+    export LANG
+fi
+
+# SDDM passes the Exec line as one argument, as the stock script expects:
+# split it on blanks, without globbing.
+set -f
+# shellcheck disable=SC2068
+exec $@

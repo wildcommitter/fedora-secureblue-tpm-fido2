@@ -58,8 +58,15 @@ has `swayidle` and `pam-u2f` already. `gtk4-layer-shell` must be added. The olde
 The drop-in locks with **Mod+Alt+L**, after 5 minutes idle, and before suspend. The
 headless VNC session (`scroll-headless`, which sets `SCROLL_SECURE_HEADLESS=1`) gets the
 keybind only, with no idle lock, because a remote user can't touch the key.
-`hardened-unlock -f` returns once the session is locked (like `swaylock -f`). That's what
-`swayidle -w ... before-sleep` needs: the machine suspends only after the lock is in place.
+`hardened-unlock -f` returns once the session is locked (like `swaylock -f`).
+
+Our scroll gives the session-lock protocol only to clients it starts itself. So scroll
+starts the locker: `lock_command hardened-unlock -f`. The `lock` command (bound to
+Mod+Alt+L) and SIGUSR1 run it, and `scroll-lock` sends that signal and returns once the
+session is locked. That's what `swayidle -w ... before-sleep scroll-lock` needs: the
+machine suspends only after the lock is in place. Running `hardened-unlock` by hand
+doesn't lock; it gets no session-lock global. With `-f`, the locker hands scroll's
+connection (`WAYLAND_SOCKET`) on to its detached child.
 
 ## Setup on the machine
 
@@ -98,11 +105,15 @@ lockscreen/test/gui-e2e.sh     # the real locker under headless scroll, typed wi
 | pam: good | key PIN, touch, then password: OK, in that order, with the touch cue shown |
 | pam: wrong-pin / no-touch | fails, and the password is never asked |
 | pam: wrong-password, same secret twice | fails |
-| gui: lock | `-f` returns only after the compositor confirmed the lock |
+| gui: lock | `scroll-lock` (SIGUSR1 → `lock_command hardened-unlock -f`) returns only once the session is locked; the state file exists |
 | gui: wrong PIN | stays locked, no password prompt |
 | gui: crash | `kill -9` of the locker leaves the session locked; a new locker takes over |
 | gui: unlock | PIN typed before Enter, touch, password: unlocked and the locker exits |
 | gui: really unlocked | the screen after the unlock isn't scroll's red abandoned-lock screen. A locker that exits before its unlock request reaches the compositor leaves the session locked, which this test caught once |
+| gui: spawned mode | on a second scroll with the default `privileged_clients spawned`: a locker run directly can't lock, grim and wtype are denied, `scroll-lock` still locks |
+
+The main gui instance sets `privileged_clients all` (lab only, `test/scroll-test.conf`), so
+that wtype and grim, plain clients, can drive it.
 
 `go test ./...` (run by `build.sh`) covers the prompt protocol: one answer per prompt,
 answers zeroed after sending.

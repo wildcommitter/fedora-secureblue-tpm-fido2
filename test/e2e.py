@@ -148,6 +148,7 @@ class Lab:
         self.machine = "q35,accel=kvm"
         self.extra_qemu = []
         self.extra_qemu_tail = []   # appended last (e.g. extra drives after the boot disk)
+        self.vga = "std"            # QEMU -vga (desktop-smoke uses virtio)
         self.vars = os.path.join(self.work, "OVMF_VARS.fd")
         self.tpm_dir = os.path.join(self.work, "tpm-machine")
         self.vf_state = os.path.join(self.work, "vfido-state.json")
@@ -219,7 +220,7 @@ class Lab:
                "-chardev", f"socket,id=chrtpm,path={sock}",
                "-tpmdev", "emulator,id=tpm0,chardev=chrtpm", "-device", "tpm-crb,tpmdev=tpm0",
                "-device", "qemu-xhci,id=xhci",
-               "-vga", "std", "-display", "none",
+               "-vga", self.vga, "-display", "none",
                "-serial", f"unix:{ser_path},server=on,wait=off",
                "-monitor", f"unix:{self.mon_path},server=on,wait=off",
                "-no-reboot"]

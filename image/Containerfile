@@ -1,5 +1,5 @@
 # Root filesystem of the workstation image: secureblue Sericea (hardened Fedora
-# Atomic Sway) + dawsers/scroll, KVM/libvirt, FIDO2 lock screen, software-rendered
+# Atomic Sway) + scroll (our hardened fork), KVM/libvirt, FIDO2 lock screen, software-rendered
 # headless session over VNC.
 #
 # This is only the first stage. ./build.sh feeds it through uki/ to produce the
@@ -14,27 +14,35 @@ ARG BASE_IMAGE=ghcr.io/secureblue/sericea-main-hardened
 ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a32c48ebf
 
 # ---------------------------------------------------------------------------
-# Stage 1: build scroll. Its patched wlroots is an in-tree subproject and is
-# linked statically, so only scroll's own files reach the final image.
+# Stage 1: build scroll from our fork (wildcommitter/scroll, see its FORK.md) as a
+# local RPM, `--with hardened`, from a pinned, annotated tag. Never from CI
+# artifacts or releases: the source is the pinned checkout, built here.
+#
+# The hardened profile has no Lua, IPC socket, scrollbar, Xwayland, Vulkan or X11
+# backend, and has the sandbox (exec broker, seccomp, Landlock). %meson brings
+# Fedora's hardening flags, and the spec's %check fails the build without them
+# (check-hardening runs again in stage 3). Its wlroots is linked statically.
 # ---------------------------------------------------------------------------
 FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
 
-ARG SCROLL_REF=1.12.21
-ARG SCROLL_COMMIT=f80c5820c0eebaad586f0008faecfe3ae62c307a
+ARG SCROLL_REPO=https://github.com/wildcommitter/scroll
+ARG SCROLL_REF=scroll-secure-20261019
+ARG SCROLL_COMMIT=7c81a4373246ac89e92d5c62a9171581b5e8e3f4
 
-RUN dnf -y install git meson ninja-build gcc lua-devel readline-devel scdoc 'dnf5-command(builddep)' \
- && dnf -y builddep wlroots sway \
- && dnf clean all
+RUN dnf -y install git rpm-build 'dnf5-command(builddep)' && dnf clean all
 
-RUN git clone --depth 1 --branch "${SCROLL_REF}" https://github.com/dawsers/scroll /src \
+# Full history: make-srpm.sh takes version and snapshot date from git.
+RUN git clone --branch "${SCROLL_REF}" "${SCROLL_REPO}" /src \
+ && test "$(git -C /src rev-parse "refs/tags/${SCROLL_REF}^{commit}")" = "${SCROLL_COMMIT}" \
  && test "$(git -C /src rev-parse HEAD)" = "${SCROLL_COMMIT}"
 
-RUN meson setup /build /src \
-      --prefix=/usr --sysconfdir=/etc --buildtype=release \
-      -Db_ndebug=true -Dwerror=false -Ddefault-wallpaper=false \
-      -Dwlroots:default_library=static -Dwlroots:examples=false \
- && meson compile -C /build \
- && DESTDIR=/out meson install -C /build --skip-subprojects
+RUN srpm=$(cd /src && packaging/make-srpm.sh -o /tmp/srpm) \
+ && dnf -y builddep --define 'with_hardened 1' "$srpm" \
+ && rpmbuild --rebuild --with hardened "$srpm" \
+ && mkdir -p /out \
+ && cp ~/rpmbuild/RPMS/x86_64/scroll-[0-9]*.hardened.fc*.x86_64.rpm /out/ \
+ && test "$(ls /out | wc -l)" = 1 \
+ && ls /out/scroll-[0-9]*.hardened.fc*.x86_64.rpm
 
 # ---------------------------------------------------------------------------
 # Stage 2: build hardened-unlock (../lockscreen, passed by build.sh as the
@@ -58,10 +66,17 @@ RUN --mount=type=cache,target=/root/go --mount=type=cache,target=/root/.cache/go
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
 
-COPY --from=scroll-build /out/ /
 COPY --from=lockscreen-build /out/ /
 
-# - lua-libs: scroll's runtime Lua; the rest of its wlroots deps come with sway in the base.
+# scroll: the local RPM from stage 1 (bind-mounted, so the file doesn't stay in the
+# image), no weak deps. /var is a tmpfs for the same reason as below.
+RUN --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
+    --mount=type=tmpfs,target=/var \
+    dnf -y install --setopt=install_weak_deps=False /tmp/scroll-rpm/scroll-[0-9]*.rpm \
+ && dnf clean all \
+ && rpm -q scroll | grep -q '\.hardened\.' \
+ && scroll -v | grep -q packaged
+
 # - libvirt modular daemons + swtpm/OVMF: VMs with vTPM and Secure Boot (also the
 #   tokenvault e2e lab).
 # - pam-u2f/pamu2fcfg/fido2-tools/tpm2-tools: lock screen + LUKS token enrollment.
@@ -69,7 +84,6 @@ COPY --from=lockscreen-build /out/ /
 # the libvirt state dirs come back via files/usr/lib/tmpfiles.d/.
 RUN --mount=type=tmpfs,target=/var \
     dnf -y install \
-      lua-libs \
       libvirt-daemon-kvm libvirt-daemon-config-network qemu-kvm \
       virt-manager virt-install swtpm swtpm-tools edk2-ovmf \
       pam-u2f pamu2fcfg fido2-tools tpm2-tools \
@@ -81,6 +95,28 @@ RUN --mount=type=tmpfs,target=/var \
 RUN for b in /usr/bin/scroll /usr/bin/hardened-unlock; do \
         if ldd "$b" | grep -q 'not found'; then ldd "$b"; exit 1; fi; \
     done
+# ... or scroll lost a hardening property of the Fedora flags.
+COPY files/usr/libexec/scroll-secure/check-hardening /usr/libexec/scroll-secure/check-hardening
+RUN /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
+
+# scroll is built without IPC, so the stock config's `bar {}` (scrollbar needs IPC)
+# can't work: delete the block. The sessions read only /etc/scroll/config, so a
+# process running as the user can't plant `exec` lines in ~/.config/scroll/config.
+# The stock $term (kitty) and $menu (wmenu-run) aren't in the image: use foot and
+# rofi. rofi is a layer-shell client, which our scroll gives only to clients it
+# starts itself, so the launcher binding uses exec_privileged.
+RUN sed -i '/^bar {$/,/^}$/d' /etc/scroll/config \
+ && ! grep -q '^bar {' /etc/scroll/config \
+ && sed -i -e 's|^set \$term kitty$|set $term foot|' \
+      -e 's|^set \$menu wmenu-run$|set $menu rofi -show drun|' \
+      -e 's|^\([[:space:]]*bindsym \$mod+r\) exec \$menu$|\1 exec_privileged $menu|' \
+      /etc/scroll/config \
+ && grep -qx 'set $term foot' /etc/scroll/config \
+ && grep -qx 'set $menu rofi -show drun' /etc/scroll/config \
+ && grep -qE '^[[:space:]]*bindsym \$mod\+r exec_privileged \$menu$' /etc/scroll/config \
+ && sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
+      /usr/share/wayland-sessions/scroll.desktop \
+ && grep -qx 'Exec=scroll -c /etc/scroll/config' /usr/share/wayland-sessions/scroll.desktop
 
 # hardened-unlock: PAM stack (FIDO2 key, then password) and the scroll snippet that
 # binds it to Mod+Alt+L, idle and suspend. The snippet only loads through the
@@ -117,6 +153,7 @@ RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
  && semodule -l | grep -qx tokenvault
 
 RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
+      /usr/libexec/scroll-secure/wayland-session /usr/libexec/scroll-secure/check-hardening \
  && bootc container lint
 
 LABEL org.opencontainers.image.title="scroll-secure" \

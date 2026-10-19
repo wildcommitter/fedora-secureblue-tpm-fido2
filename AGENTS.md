@@ -93,6 +93,7 @@ sudo test/bootc/lab-secureboot.sh test/bootc/work <keys-dir> [<dev db.key>]   # 
 sudo test/bootc/build-disk.sh test/bootc/work <image>                          # lab disk
 test/bootc/e2e.py [--cli-from-image] [scenario ...]    # tokenvault, 11 scenarios
 test/bootc/sb-enroll-e2e.py                            # Secure Boot key enrollment from Setup Mode
+test/bootc/desktop-smoke.py                            # SDDM -> scroll on DRM (virtio GPU), FORK.md checklist
 lockscreen/test/pam-e2e.sh                             # PAM stack with the virtual key (container)
 lockscreen/test/gui-e2e.sh                             # locker under headless scroll + wtype
 ```
@@ -125,6 +126,25 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
 - **ext-session-lock:** a locker must round-trip the unlock (`display.Sync()`) before
   exiting, or the compositor treats it as crashed and stays locked (scroll's red screen).
   `::unlocked` fires synchronously inside `Unlock()`.
+- **Privileged protocols** (our scroll fork): only clients scroll starts itself
+  (`exec_privileged`, `lock_command`) get session-lock, screencopy, virtual input,
+  layer-shell and the like. A locker or wtype/grim run by hand gets no such global. Lab
+  configs set `privileged_clients all`; never put that in the image.
+- **WAYLAND_SOCKET** is one connection, consumed by the first `wl_display_connect`. A
+  privileged process that re-execs (`hardened-unlock -f`) must pass the fd on itself;
+  Go's `exec.Command` only passes `ExtraFiles`.
+- **podman cache vs signing keys:** the layer cache doesn't key on `--mount=type=secret`
+  contents. A cached signing layer from a build with other keys is reused silently, and
+  OVMF then rejects systemd-boot ("Access Denied"). `build.sh` builds the signing stages
+  with `--no-cache` and runs `sbverify` on systemd-boot and the UKI. Use `BUILD_PREFIX` for
+  parallel builds, because the intermediate image names are shared otherwise.
+- **Hardening flags:** plain `meson setup` uses none of Fedora's (no PIE, RELRO, FORTIFY,
+  CET). scroll is built as an RPM (`%meson`) for that reason.
+- **Forced DRM connectors** (`echo on > /sys/class/drm/cardN-X/status`) send no uevent.
+  wlroots rescans only on a drm change event with `HOTPLUG=1`. desktop-smoke.py uses a lab
+  udev rule plus a synthetic uevent.
+- **Lab dirs in the guest:** root's umask on secureblue is 027. Create the dirs sddm or the
+  user must read with an explicit umask and owner, or sddm-helper exits 3.
 - **Option ROM hashes** come from the TPM event log (PCR 2, `EV_EFI_BOOT_SERVICES_DRIVER`).
   Without them in db, a discrete GPU has no display under our keys. Never drop them
   silently.
