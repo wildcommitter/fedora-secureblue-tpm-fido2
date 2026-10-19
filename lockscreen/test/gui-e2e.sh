@@ -23,13 +23,13 @@ IMAGE=${IMAGE:-localhost/scroll-secure-rootfs:latest}
 W=${WORK:-$HERE/work/gui}
 KEY_PIN=246810
 ACCT_PASS=Acct-Pass-1
-TEST_IMAGE=localhost/hardened-unlock-guitest:latest
+TEST_IMAGE=${TEST_IMAGE:-localhost/hardened-unlock-guitest:latest}
 
 [[ -x $LS/out/hardened-unlock ]] || { echo "run lockscreen/build.sh first" >&2; exit 1; }
 podman build -q --build-arg IMAGE="$IMAGE" -t "$TEST_IMAGE" -f "$HERE/Containerfile.gui" "$HERE" >/dev/null
 
 rm -rf "$W"; mkdir -p "$W/ctl"; chmod 0777 "$W"   # written by the container's test user
-VF= CT=hardened-unlock-guitest
+VF= CT=${CT_NAME:-hardened-unlock-guitest}
 cleanup() {
     set +e
     podman rm -f "$CT" >/dev/null 2>&1

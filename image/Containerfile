@@ -21,14 +21,14 @@ ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a3
 # - Fedora's distro flags (PIE, full RELRO, stack protector, FORTIFY, CET): plain
 #   meson builds without them, and the stock build had none of them.
 # - No Lua, no IPC socket, no scrollbar, no Xwayland, no Vulkan or X11 backend.
-# - sandbox: exec broker + seccomp + Landlock in the compositor (see FORK.md).
+# - TODO(sandbox): add -Dsandbox=true (exec broker + seccomp + Landlock in the
+#   compositor, see FORK.md) once the fork has it. Without it, the build fails.
 # ---------------------------------------------------------------------------
 FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
 
 ARG SCROLL_REPO=https://github.com/wildcommitter/scroll
 ARG SCROLL_REF=hardening
-# scroll-secure: placeholder until the fork's hardening branch is pinned
-ARG SCROLL_COMMIT=0000000000000000000000000000000000000000
+ARG SCROLL_COMMIT=dcaba3b69e9dae91fc506399ac5833e76c35517c
 
 RUN dnf -y install git meson ninja-build gcc redhat-rpm-config readline-devel scdoc \
       'dnf5-command(builddep)' \
@@ -42,7 +42,7 @@ RUN export CFLAGS="$(rpm --eval '%{build_cflags}')" LDFLAGS="$(rpm --eval '%{bui
  && meson setup /build /src \
       --prefix=/usr --sysconfdir=/etc --buildtype=release \
       -Db_ndebug=true -Db_pie=true -Dwerror=false -Ddefault-wallpaper=false \
-      -Dlua=disabled -Dipc=false -Dscrollbar=false -Dsandbox=true \
+      -Dlua=disabled -Dipc=false -Dscrollbar=false \
       -Dwlroots:default_library=static -Dwlroots:examples=false \
       -Dwlroots:xwayland=disabled -Dwlroots:renderers=gles2 \
       -Dwlroots:backends=drm,libinput \
