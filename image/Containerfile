@@ -110,15 +110,24 @@ RUN /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
 # The stock $term (kitty) and $menu (wmenu-run) aren't in the image: use foot and
 # rofi. rofi is a layer-shell client, which our scroll gives only to clients it
 # starts itself, so the launcher binding uses exec_privileged.
+# The exit prompt (scrollnag, layer-shell) and the screenshot (grim, screencopy) need
+# exec_privileged too. Without IPC the prompt's `scrollmsg exit` can't work: it ends
+# the logind session instead. Edited in place: a config.d override would make scroll
+# show its "errors in your config file" bar (overwritten binding).
 RUN sed -i '/^bar {$/,/^}$/d' /etc/scroll/config \
  && ! grep -q '^bar {' /etc/scroll/config \
  && sed -i -e 's|^set \$term kitty$|set $term foot|' \
       -e 's|^set \$menu wmenu-run$|set $menu rofi -show drun|' \
       -e 's|^\([[:space:]]*bindsym \$mod+r\) exec \$menu$|\1 exec_privileged $menu|' \
+      -e "/^[[:space:]]*bindsym \$mod+Shift+x exec scrollnag /{s| exec scrollnag | exec_privileged scrollnag |;s|'scrollmsg exit'|'loginctl terminate-session self'|}" \
+      -e "s|^\([[:space:]]*bindsym Print\) exec grim$|\1 exec_privileged sh -c 'mkdir -p ~/Pictures/Screenshots \&\& exec grim ~/Pictures/Screenshots/\$(date +%F_%H-%M-%S).png'|" \
       /etc/scroll/config \
  && grep -qx 'set $term foot' /etc/scroll/config \
  && grep -qx 'set $menu rofi -show drun' /etc/scroll/config \
  && grep -qE '^[[:space:]]*bindsym \$mod\+r exec_privileged \$menu$' /etc/scroll/config \
+ && grep -qE "^[[:space:]]*bindsym \\\$mod\+Shift\+x exec_privileged scrollnag .*'loginctl terminate-session self'" /etc/scroll/config \
+ && ! grep -q 'scrollmsg exit' /etc/scroll/config \
+ && grep -qE '^[[:space:]]*bindsym Print exec_privileged sh -c .*exec grim ~/Pictures/Screenshots/' /etc/scroll/config \
  && sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
       /usr/share/wayland-sessions/scroll.desktop \
  && grep -qx 'Exec=scroll -c /etc/scroll/config' /usr/share/wayland-sessions/scroll.desktop

@@ -26,6 +26,8 @@ SHEET = [
         ("Super Shift Backspace", "close the others", ["$mod+Shift+Backspace"]),
         ("Super Shift C", "reload config", ["$mod+Shift+c"]),
         ("Super Alt L", "lock (key PIN + touch, then password)", ["$mod+Alt+l"]),
+        ("Super Shift X", "log out (asks first)", ["$mod+Shift+x"]),
+        ("Print", "screenshot to ~/Pictures/Screenshots", ["Print"]),
     ]),
     ("Focus and move", [
         ("Super ←↑↓→", "focus", ["$mod+$left", "$mod+$down", "$mod+$up", "$mod+$right"]),
