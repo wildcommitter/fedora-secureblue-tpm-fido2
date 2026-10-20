@@ -71,10 +71,15 @@ connection (`WAYLAND_SOCKET`) on to its detached child.
 ## Setup on the machine
 
 1. Register the key once, as in `image/README.md`. That's the same registration swaylock
-   uses:
+   uses. Plug in only that key, then:
    ```sh
-   pamu2fcfg -u "$USER" -o pam://workstation -i pam://workstation -N | run0 tee /etc/u2f_mappings
+   run0 hardened-unlock key add      # asks the key PIN, then a touch; up to 4 keys
+   hardened-unlock key status        # as root: run0 hardened-unlock key status
    ```
+   It runs `pamu2fcfg` with origin `pam://workstation` and adds the key to the root-owned
+   `/etc/u2f_mappings` (mode 0644). Until a key is registered, a lock can't be opened: the
+   lock screen says so and points to a text console (Ctrl+Alt+F3), where `key add` fixes it
+   while the session stays locked.
 2. Before relying on the locker, check the PAM stack from a terminal. `authtest` uses the
    same code and PAM service but never locks anything:
    ```sh

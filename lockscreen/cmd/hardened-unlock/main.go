@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"hardened-unlock/internal/duress"
 	"hardened-unlock/internal/pamauth"
 	"hardened-unlock/internal/sessionlock"
+	"hardened-unlock/internal/u2fmap"
 )
 
 const (
@@ -46,6 +48,13 @@ const (
 	// debugEnv set to 1 logs every PAM prompt and status message (never an
 	// answer) to stderr, for the e2e test and for troubleshooting.
 	debugEnv = "HARDENED_UNLOCK_DEBUG"
+
+	// noKeyMessage replaces pam_u2f's "cannot retrieve authentication info"
+	// when the user has no key in the mapping file: the key step can't pass,
+	// so this lock can't be opened until a key is registered.
+	noKeyMessage = "No security key is registered for this account, so the screen can't be " +
+		"unlocked yet. Switch to a text console (Ctrl+Alt+F3), log in and run " +
+		"`run0 hardened-unlock key add`, then come back (Ctrl+Alt+F1 or F2) and unlock."
 )
 
 var debug = os.Getenv(debugEnv) == "1"
@@ -107,6 +116,9 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "duress" {
 		os.Exit(duressCLI(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "key" {
+		os.Exit(keyCLI(os.Args[2:]))
+	}
 
 	for _, arg := range os.Args[1:] {
 		switch arg {
@@ -115,7 +127,8 @@ func main() {
 		default:
 			fmt.Fprintf(os.Stderr, "usage: hardened-unlock [-f]\n"+
 				"  -f  return once the session is locked (for swayidle before-sleep)\n"+
-				"       hardened-unlock duress set|clear|status   (as root)\n")
+				"       hardened-unlock duress set|clear|status   (as root)\n"+
+				"       hardened-unlock key add|status            (as root)\n")
 			os.Exit(2)
 		}
 	}
@@ -267,8 +280,13 @@ func (ls *lockScreen) buildInteractivePanel() *gtk.Box {
 	status := gtk.NewLabel("Key PIN, touch, then password")
 	status.AddCSSClass("lock-status")
 	status.SetWrap(true)
+	status.SetMaxWidthChars(48)
 	panel.Append(status)
 	ls.status = status
+	if !keyRegistered() {
+		debugf("no key registered")
+		ls.setStatus(noKeyMessage, true)
+	}
 
 	outer.Append(panel)
 	return outer
@@ -417,6 +435,9 @@ func (ls *lockScreen) handleAuthResult(result pamauth.Result, err error) {
 	message := result.Message
 	if err != nil {
 		message = "Internal error: " + err.Error()
+	} else if !keyRegistered() {
+		debugf("no key registered")
+		message = noKeyMessage
 	} else if message == "" {
 		message = "Authentication failed"
 	}
@@ -511,6 +532,24 @@ func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// keyRegistered reports whether the user has a key in the mapping file. It is
+// read again on every check, so a key added from a console while locked
+// counts at the next attempt. An unreadable file counts as registered: PAM's
+// own message is more useful then.
+func keyRegistered() bool {
+	u, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		debugf("look up uid %d: %v", os.Getuid(), err)
+		return true
+	}
+	ok, err := u2fmap.Registered(u2fmap.File, u.Username)
+	if err != nil {
+		debugf("read %s: %v", u2fmap.File, err)
+		return true
+	}
+	return ok
 }
 
 func currentUsernameOrFallback() string {

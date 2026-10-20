@@ -11,9 +11,11 @@
 # Checks: scroll-lock returns once the session is locked; typing the key PIN,
 # touching (auto) and typing the password unlocks; a wrong PIN keeps it locked;
 # after the locker is killed the session stays locked and a new locker can take
-# over and unlock it. On a second scroll with the default `privileged_clients
-# spawned`: a locker started directly gets no session lock, grim and wtype get
-# no capture or virtual keyboard, and scroll-lock still locks.
+# over and unlock it. With no key registered the lock screen says so, a PIN
+# doesn't unlock, and a key registered while locked works at the next try.
+# On a second scroll with the default `privileged_clients spawned`: a locker
+# started directly gets no session lock, grim and wtype get no capture or
+# virtual keyboard, and scroll-lock still locks.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -172,6 +174,37 @@ fi
 tail -n +"$((mark + 1))" "$W/vfido.log" | grep -q 'up=granted' && ok "the key was touched" || bad "no touch seen by the key"
 grep -q 'answered with the text typed before Enter' "$W/locker.log" && ok "PIN typed before Enter answered the PIN prompt" \
     || bad "pre-typed PIN not used"
+
+# 4b. No key registered: the lock says so instead of pam_u2f's "cannot retrieve
+# authentication info". A key registered while locked counts at the next try.
+ct mv /etc/u2f_mappings /etc/u2f_mappings.off
+if start_locker && grep -q 'no key registered' "$W/locker.log"; then
+    ok "no key registered: the lock screen says so"
+else
+    bad "no-key message at lock"; cat "$W/locker.log"
+fi
+type_text "$KEY_PIN"
+if wait_log 'result success=false' 20 && [[ $(grep -c 'no key registered' "$W/locker.log") -ge 2 ]] \
+        && ! grep -q 'prompt: Password' "$W/locker.log" && locker_running; then
+    ok "no key registered: a PIN doesn't unlock, the message stays"
+else
+    bad "no-key attempt"; cat "$W/locker.log"
+fi
+ct mv /etc/u2f_mappings.off /etc/u2f_mappings
+: > "$W/locker.log"
+type_text "$KEY_PIN"
+if wait_log 'prompt: Password' 30; then
+    type_text "$ACCT_PASS"
+    if wait_log 'result success=true' 20; then
+        for _ in $(seq 1 20); do locker_running || break; sleep 0.25; done
+        locker_running && bad "locker still running after the key was registered" \
+            || ok "key registered while locked: PIN + touch + password unlocks"
+    else
+        bad "password not accepted after registering"; cat "$W/locker.log"
+    fi
+else
+    bad "no password prompt after registering"; cat "$W/locker.log"
+fi
 
 # 5. A second scroll with the default `privileged_clients spawned`
 ENV2=(XDG_RUNTIME_DIR=/run/user/tester2 WLR_BACKENDS=headless WLR_RENDERER=pixman

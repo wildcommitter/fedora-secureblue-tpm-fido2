@@ -209,10 +209,10 @@ Microsoft-signed binaries, and our db trusts none.
 ## After the first boot
 
 ```sh
-# Lock-screen key (one registration serves hardened-unlock and swaylock).
+# Lock-screen key (one registration serves hardened-unlock and swaylock). Do this
+# before the first lock: without a key the lock screen can't be opened (it says so).
 # Register only the real key: unplug or stop any virtual test key first.
-pamu2fcfg -u "$USER" -o pam://workstation -i pam://workstation -N | run0 tee /etc/u2f_mappings
-run0 chmod 0644 /etc/u2f_mappings
+run0 hardened-unlock key add
 
 # Optional: enroll a fingerprint, then switch pinverification=1 -> userverification=1
 fido2-token -S -e /dev/hidrawN
