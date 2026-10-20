@@ -143,6 +143,12 @@ RUN systemctl enable \
       virtnodedevd.socket virtsecretd.socket virtlogd.socket
 
 COPY files/ /
+# Wallpaper (config.d/10-desktop.conf): a key-binding cheatsheet drawn from the final
+# config. Fails the build if a key on the sheet isn't bound.
+RUN --mount=type=bind,source=keys-wallpaper.py,target=/tmp/keys-wallpaper.py \
+    mkdir -p /usr/share/scroll-secure \
+ && python3 -I /tmp/keys-wallpaper.py /etc/scroll/config /usr/share/scroll-secure/keys.png \
+ && test -s /usr/share/scroll-secure/keys.png
 # Secure Boot key creation/enrollment (option ROM hashes into db); see README.md.
 COPY uki/secure-boot-keys.sh /usr/libexec/scroll-secure/secure-boot-keys
 
