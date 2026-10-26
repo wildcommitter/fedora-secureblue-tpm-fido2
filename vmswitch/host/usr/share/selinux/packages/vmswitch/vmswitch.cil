@@ -1,0 +1,6 @@
+; vmswitch: SELinux for the pieces vmswitch turns on. Installed by image/Containerfile.
+;
+; usbguard-daemon resolves IPCAllowedUsers/Groups through NSS; systemd's userdb then
+; asks machined (io.systemd.Machine) too, which usbguard_t may not connect to. The
+; answer isn't needed (no VM users are allowed), so it stays denied, just not logged.
+(dontaudit usbguard_t systemd_machined_t (unix_stream_socket (connectto)))
