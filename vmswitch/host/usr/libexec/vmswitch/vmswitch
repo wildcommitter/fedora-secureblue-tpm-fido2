@@ -8,11 +8,17 @@ from a peer on the same network pass, so the host's own frames are dropped. So g
 learning), guests on different networks or on none see nothing, and the host stack
 never takes part. No bridge, no daemon: the kernel and nft do the switching.
 
+The network `uplink` is built in and routed instead: each NIC on it gets its own /30
+(host 10.88.N.1, guest 10.88.N.2) and nftables masquerades it out of the host's
+default route. Uplink guests reach the internet only: not the host's services, not
+private or link-local ranges (the LAN), not each other. While any NIC is on uplink the
+host forwards IPv4, and only these flows (the forward chain's policy is drop).
+
   vmswitch show                         the switching table (JSON)
   vmswitch net add|del <net>
   vmswitch nic add <guest> <nic>        create the NIC's TAP (not on any network)
   vmswitch nic del <guest> <nic>
-  vmswitch plug <guest> <nic> <net>|-   move the NIC to a network, or off all networks
+  vmswitch plug <guest> <nic> <net>|-   move the NIC to a network (or uplink), or off all
   vmswitch apply                        recreate TAPs and the table from the state
   vmswitch xml <guest> <nic>            libvirt <interface> for the guest's domain XML
 
@@ -30,6 +36,11 @@ import sys
 STATE = os.environ.get("VMSWITCH_STATE", "/var/lib/vmswitch/table.json")
 TAP_USER = os.environ.get("VMSWITCH_TAP_USER", "qemu")
 TABLE = "vmswitch"
+UPLINK = "uplink"
+# Never routed to from an uplink guest: this host's nets, the LAN, link-local, CGNAT,
+# multicast and the rest of the reserved space.
+NO_ROUTE = ("0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, "
+            "172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3")
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
@@ -84,12 +95,23 @@ def tap_exists(tap):
     return os.path.exists(f"/sys/class/net/{tap}")
 
 
-def tap_create(tap):
+def uplink_ips(n):
+    i = n["uplink"]
+    return f"10.88.{i}.1", f"10.88.{i}.2"
+
+
+def tap_create(n):
+    tap = n["tap"]
     if not tap_exists(tap):
         run("ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", TAP_USER, "group", TAP_USER)
-    # No IPv6 link-local address and no ARP from the host on a guest's wire (the
-    # egress hook drops the rest).
-    run("ip", "link", "set", "dev", tap, "addrgenmode", "none", "arp", "off", "up")
+    # No IPv6 link-local address on a guest's wire. Switched NICs: no host address and
+    # no ARP either (the egress hook drops the rest). Uplink NICs: the host's /30 end.
+    run("ip", "addr", "flush", "dev", tap)
+    if n["net"] == UPLINK:
+        run("ip", "link", "set", "dev", tap, "addrgenmode", "none", "arp", "on", "up")
+        run("ip", "addr", "add", uplink_ips(n)[0] + "/30", "dev", tap)
+    else:
+        run("ip", "link", "set", "dev", tap, "addrgenmode", "none", "arp", "off", "up")
 
 
 def tap_delete(tap):
@@ -104,10 +126,23 @@ def ruleset(st):
         n = st["nics"][k]
         tap, mac = n["tap"], n["mac"]
         peers = sorted((st["nics"][p]["tap"], st["nics"][p]["mac"]) for p in st["nics"]
-                       if p != k and n["net"] is not None and st["nics"][p]["net"] == n["net"])
+                       if p != k and n["net"] not in (None, UPLINK) and st["nics"][p]["net"] == n["net"])
         out.append(f"  chain in_{tap} {{")
         out.append(f'    type filter hook ingress device "{tap}" priority filter; policy drop;')
         out.append(f"    # {k} on {n['net'] or '(no network)'}")
+        if n["net"] == UPLINK:
+            # To the host stack, from the guest's MAC and address only; inet vmswitch
+            # decides what is routed.
+            host, guest = uplink_ips(n)
+            out.append(f"    ether saddr {mac} arp saddr ip {guest} accept")
+            out.append(f"    ether saddr {mac} ip saddr {guest} accept")
+            out.append("  }")
+            out.append(f"  chain out_{tap} {{")
+            out.append(f'    type filter hook egress device "{tap}" priority filter; policy drop;')
+            out.append(f"    arp saddr ip {host} accept")
+            out.append(f"    ip saddr != {guest} ip daddr {guest} accept")
+            out.append("  }")
+            continue
         for p, _ in peers:
             out.append(f'    ether saddr {mac} dup to "{p}"')
         out.append("  }")
@@ -119,15 +154,45 @@ def ruleset(st):
             out.append(f"    ether saddr {{ {', '.join(m for _, m in peers)} }} accept")
         out.append("  }")
     out.append("}")
+    up = sorted(n["tap"] for n in st["nics"].values() if n["net"] == UPLINK)
+    out += [f"table inet {TABLE}", f"delete table inet {TABLE}"]
+    if up:
+        taps = ", ".join(f'"{t}"' for t in up)
+        out += [f"table inet {TABLE} {{",
+                f"  set uplinks {{ type ifname; elements = {{ {taps} }}; }}",
+                "  # Guests never reach the host's own services.",
+                "  chain input {",
+                "    type filter hook input priority filter; policy accept;",
+                '    iifname "vs*" drop',
+                "  }",
+                "  # The host routes only uplink flows while this table exists.",
+                "  chain forward {",
+                "    type filter hook forward priority filter; policy drop;",
+                '    iifname "vs*" oifname "vs*" drop',
+                f"    iifname @uplinks ip daddr {{ {NO_ROUTE} }} drop",
+                '    iifname @uplinks oifname != "vs*" meta nfproto ipv4 accept',
+                "    oifname @uplinks ct state established,related accept",
+                "  }",
+                "  chain postrouting {",
+                "    type nat hook postrouting priority srcnat; policy accept;",
+                '    iifname @uplinks oifname != "vs*" masquerade',
+                "  }",
+                "}"]
     return "\n".join(out) + "\n"
 
 
 def apply(st):
     for n in st["nics"].values():
-        tap_create(n["tap"])
+        tap_create(n)
     rs = ruleset(st)
     run("nft", "-c", "-f", "-", input=rs)
     run("nft", "-f", "-", input=rs)
+    if any(n["net"] == UPLINK for n in st["nics"].values()):
+        with open("/proc/sys/net/ipv4/ip_forward") as f:
+            on = f.read().strip() == "1"
+        if not on:
+            with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                f.write("1")
 
 
 def main(argv):
@@ -146,6 +211,8 @@ def main(argv):
         return
     if cmd == "net" and len(args) == 2 and args[0] in ("add", "del"):
         net = check_name("network", args[1])
+        if net == UPLINK:
+            die(f"{UPLINK} is built in")
         if args[0] == "add":
             if net in st["nets"]:
                 die(f"network {net} exists")
@@ -178,9 +245,16 @@ def main(argv):
         if k not in st["nics"]:
             die(f"no NIC {k}")
         net = None if args[2] == "-" else check_name("network", args[2])
-        if net is not None and net not in st["nets"]:
+        if net not in (None, UPLINK) and net not in st["nets"]:
             die(f"no network {net}")
-        st["nics"][k]["net"] = net
+        n = st["nics"][k]
+        n.pop("uplink", None)
+        if net == UPLINK:
+            used = {m.get("uplink") for m in st["nics"].values()}
+            n["uplink"] = next((i for i in range(256) if i not in used), None)
+            if n["uplink"] is None:
+                die("no free uplink /30 left")
+        n["net"] = net
     elif cmd == "apply" and not args:
         pass
     elif cmd == "xml" and len(args) == 2:
@@ -189,6 +263,10 @@ def main(argv):
         print(f"<interface type='ethernet'>\n  <mac address='{n['mac']}'/>\n"
               f"  <target dev='{n['tap']}' managed='no'/>\n  <model type='virtio'/>\n"
               f"</interface>")
+        if n["net"] == UPLINK:
+            host, guest = uplink_ips(n)
+            print(f"<!-- in the guest (no DHCP): address {guest}/30, gateway {host}, "
+                  f"DNS a public resolver, e.g. 9.9.9.9 -->")
         return
     else:
         die(f"bad command: {' '.join(argv)}")

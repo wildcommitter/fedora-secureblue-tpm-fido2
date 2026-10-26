@@ -10,7 +10,11 @@
 # Checks: a frame reaches a NIC on the same network and not one on another; a NIC on
 # no network is cut off; plugging moves it; a spoofed source MAC is dropped; the host
 # sends nothing onto a TAP (no IPv6 RS/ND, egress drop); the table survives apply;
-# deleting a NIC removes its TAP and chains.
+# deleting a NIC removes its TAP and chains. Uplink (a dummy "wan" with the default
+# route stands in for the host's network): the host answers ARP but not pings, a ping
+# to the internet leaves wan masqueraded, the LAN and a spoofed source don't leave,
+# unplugging removes the routing table. /proc/sys is read-only in a container, so
+# forwarding starts on here; vmswitch switching it on is for the KVM e2e.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,6 +32,7 @@ podman rm -f "$CT" > /dev/null 2>&1 || true
 trap 'podman rm -f "$CT" > /dev/null 2>&1' EXIT
 # Own network namespace (podman default); NET_ADMIN only inside it.
 podman run -d --init --name "$CT" --network none --cap-add NET_ADMIN --device /dev/net/tun \
+    --sysctl net.ipv4.ip_forward=1 \
     -e VMSWITCH_STATE=/var/lib/vmswitch/table.json -e VMSWITCH_TAP_USER=root \
     -v "$VS/host/usr/libexec/vmswitch/vmswitch:/usr/libexec/vmswitch/vmswitch:ro,Z" \
     -v "$HERE/tapprobe.py:/vstest/tapprobe.py:ro,Z" \
@@ -89,6 +94,38 @@ if ! ct test -e "/sys/class/net/$C" && ! ct nft list table netdev vmswitch | gre
     ok "nic del removes the TAP and its chains"
 else
     bad "nic del removes the TAP and its chains"
+fi
+# ---- uplink
+ct sh -euc 'ip link add wan type dummy; ip addr add 192.0.2.2/24 dev wan; ip link set wan up
+            ip route add default via 192.0.2.1 dev wan
+            nft -f - <<EOT
+table netdev labwan {
+  chain out { type filter hook egress device "wan" priority filter; policy accept;
+    ip saddr 192.0.2.2 icmp type echo-request counter
+    ip saddr 10.88.0.0/16 counter
+  }
+}
+EOT'
+masq() { ct nft list chain netdev labwan out | sed -n "s|.*ip saddr $1 .*counter packets \([0-9]*\).*|\1|p"; }
+vs plug ga eth0 uplink
+GA=10.88.0.2 HOST=10.88.0.1
+if probe arp "$A" "$MA" "$GA" "$HOST" 2 > /dev/null; then ok "uplink: host answers ARP"; else bad "uplink: host answers ARP"; fi
+HM=$(ct cat "/sys/class/net/$A/address")
+probe ping "$A" "$MA" "$HM" "$GA" 198.51.100.7 1 > /dev/null || true
+[[ $(masq 192.0.2.2) == 1 && $(masq 10.88.0.0/16) == 0 ]] && ok "uplink: internet ping leaves wan masqueraded" \
+    || bad "uplink: internet ping leaves wan masqueraded (masq=$(masq 192.0.2.2) raw=$(masq 10.88.0.0/16))"
+probe ping "$A" "$MA" "$HM" "$GA" 192.168.1.5 1 > /dev/null || true
+probe ping "$A" "$MA" "$HM" 10.88.0.66 198.51.100.7 1 > /dev/null || true
+[[ $(masq 192.0.2.2) == 1 && $(masq 10.88.0.0/16) == 0 ]] && ok "uplink: LAN and spoofed source don't leave" \
+    || bad "uplink: LAN and spoofed source don't leave"
+probe ping "$A" "$MA" "$HM" "$GA" "$HOST" 1 > /dev/null && bad "uplink: host answered a ping" \
+    || ok "uplink: host services closed (no ping reply)"
+delivered "$A" "$MA" "$B" t7 && bad "uplink NIC still switched to gb" || ok "uplink NIC is off the switched networks"
+vs plug ga eth0 -
+if ! ct nft list table inet vmswitch > /dev/null 2>&1 && [[ -z $(ct ip -4 addr show dev "$A") ]]; then
+    ok "unplug: routing table and host address gone"
+else
+    bad "unplug: routing table and host address gone"
 fi
 echo "vmswitch-e2e: $pass passed, $fail failed"
 ((fail == 0))
