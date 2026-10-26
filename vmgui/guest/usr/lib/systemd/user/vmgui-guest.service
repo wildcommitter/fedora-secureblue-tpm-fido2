@@ -1,0 +1,13 @@
+[Unit]
+Description=vmgui: show this VM's Wayland apps on the host
+Documentation=file:///usr/share/doc/vmgui/README.md
+ConditionVirtualization=vm
+ConditionPathExists=/dev/vsock
+
+[Service]
+ExecStart=/usr/libexec/vmgui/vmgui-guest
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

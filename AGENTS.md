@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Instructions for coding agents working in this repo. Human-facing docs: `README.md`
-(index), `image/README.md`, `image/LUKS.md`, `lockscreen/README.md`.
+(index), `image/README.md`, `image/LUKS.md`, `lockscreen/README.md`, `vmgui/README.md`.
 
 ## What this is
 
@@ -31,6 +31,7 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `image/Containerfile`, `image/build.sh`, `image/files/`, `image/uki/` | Image build, signing pipeline (vendored from secureblue, see `uki/VENDORED`), install, Secure Boot keys (`uki/secure-boot-keys.sh`) |
 | `image/files-luks/`, `image/LUKS.md` | tokenvault: dracut module + generator (initrd), `tokenvault` CLI, SELinux CIL (`tokenvault_conf_t`), tmpfiles |
 | `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in |
+| `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`), `guest/` (addon for the VMs), `test/` |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
 | `test/bootc/` | tokenvault e2e, Secure Boot enrollment e2e and the duress reset e2e on the sealed image |
 
@@ -65,6 +66,9 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 - **"Password per token" means the token's own PIN**: the TPM2 PIN goes in the TPM policy,
   the FIDO2 PIN is the key's client PIN. The semantics are AND, never OR. Don't
   reintroduce separate passwords or derived keys.
+- **Virtualization stays bare.** `check-virt` holds the allowlist; adding a package there
+  is a design change (ask). VM windows come only over vsock from the VM's CID, through
+  a `scroll-vm` security context: no TCP, no GPU path.
 - **Don't change the security design without the user.** That covers the PCR policy (signed
   PCR 11 + PCR 7 + PIN), the post-quantum vault layout, dropping the Microsoft CA, and
   the duress semantics (hard reset, no unlock, no boot-time duress). Propose instead.
@@ -87,7 +91,8 @@ and `/usr/libexec/tokenvault/check-uki` (from `image/files-luks/`) on the signed
 - **Key layout:** nested in the repo (`uki/keys/{PK,KEK,db,PCR}/`, plus `GUID`), but flat
   in the image (`/usr/share/secureblue/uki/keys/`, copied by `uki/Containerfile.base`).
   `secure-boot-keys.sh` accepts both.
-- **Building `image/Containerfile` by hand** needs `--build-context lockscreen=../lockscreen`.
+- **Building `image/Containerfile` by hand** needs `--build-context lockscreen=../lockscreen
+  --build-context vmgui=../vmgui`.
   `build.sh` passes it.
 - **`uki/` is vendored.** Our changes are marked `scroll-secure:`. Re-apply them when
   re-vendoring, and update `uki/VENDORED`.
@@ -107,6 +112,7 @@ lockscreen/test/pam-e2e.sh                             # PAM stack with the virt
 lockscreen/test/gui-e2e.sh                             # locker under headless scroll + wtype
 lockscreen/test/duress-e2e.sh                          # duress canary, duresstest build (marker, no reset)
 test/bootc/duress-vm-e2e.py --work <w>                 # the real duress hard reset, inside a VM
+vmgui/test/vmgui-e2e.sh                                # VM windows: headless scroll + vsock loopback (container)
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.

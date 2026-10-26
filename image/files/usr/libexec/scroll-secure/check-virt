@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Fail the build unless the virtualization stack is exactly the bare set: KVM
+# through libvirt's QEMU driver, vTPM (swtpm), UEFI (OVMF) and waypipe for vmgui.
+# No GUI/SPICE/remote-storage/Xen/VirtualBox/LXC bits, no qemu-user, no podman
+# machine.
+#
+#   check-virt          (in the image build, after the dnf transaction)
+set -euo pipefail
+
+die() { echo "check-virt: $*" >&2; exit 1; }
+
+# Everything virtualization-related that may be installed.
+allowed=(
+    edk2-ovmf ipxe-roms-qemu seabios-bin
+    libvirt-client libvirt-libs libvirt-daemon libvirt-daemon-common
+    libvirt-daemon-driver-qemu libvirt-daemon-driver-network libvirt-daemon-driver-nodedev
+    libvirt-daemon-driver-secret libvirt-daemon-driver-storage-core
+    libvirt-daemon-lock libvirt-daemon-log libvirt-daemon-plugin-lockd libvirt-daemon-proxy
+    qemu-common qemu-img qemu-kvm-core qemu-system-x86-core qemu-device-usb-host
+    swtpm swtpm-libs swtpm-selinux swtpm-tools
+    virt-what xen-libs xen-licenses
+    waypipe
+)
+# ... and what must be.
+required=(qemu-kvm-core libvirt-daemon-driver-qemu libvirt-client swtpm swtpm-tools edk2-ovmf waypipe)
+pattern='^(qemu|libvirt|virt|xen|swtpm|edk2|seabios|ipxe|spice|virtualbox|vbox|lxc|gvisor|podman-machine|waypipe|crun-vm|krun|libkrun|cloud-hypervisor|firecracker|bochs)'
+
+fail=0
+while read -r name; do
+    [[ " ${allowed[*]} " == *" $name "* ]] || { echo "check-virt: not allowed: $name" >&2; fail=1; }
+done < <(rpm -qa --qf '%{NAME}\n' | grep -E "$pattern" | sort -u)
+for name in "${required[@]}"; do
+    rpm -q "$name" > /dev/null || { echo "check-virt: missing: $name" >&2; fail=1; }
+done
+# No default NAT network: guests get networking only when it's defined on purpose.
+[[ ! -e /etc/libvirt/qemu/networks/default.xml ]] || { echo "check-virt: default network present" >&2; fail=1; }
+((fail == 0)) || die "virtualization package set is not the bare one"
+echo "check-virt: ok"

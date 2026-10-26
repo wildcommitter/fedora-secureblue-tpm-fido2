@@ -1,0 +1,38 @@
+#!/usr/bin/python3 -I
+"""vmgui-guest: forward this VM's Wayland apps to the host's scroll session.
+
+Runs as the guest user (vmgui-guest.service). Starts `waypipe server` on the
+display $XDG_RUNTIME_DIR/wayland-vmgui; each app that connects there becomes one
+vsock connection to the host (CID 2), port 20000 + this VM's CID, where
+vmgui-host checks the CID and draws the windows with the VM's frame.
+"""
+import fcntl
+import os
+import socket
+import struct
+import sys
+
+PORT_BASE = 20000
+
+
+def local_cid():
+    with open("/dev/vsock", "rb") as f:
+        buf = fcntl.ioctl(f, socket.IOCTL_VM_SOCKETS_GET_LOCAL_CID, struct.pack("=I", 0))
+    return struct.unpack("=I", buf)[0]
+
+
+def main():
+    try:
+        cid = local_cid()
+    except OSError as e:
+        sys.exit(f"vmgui-guest: no vsock device ({e}); add it with `vmgui xml <vm>` on the host")
+    if cid < 3:
+        sys.exit(f"vmgui-guest: local CID is {cid}, not a guest")
+    os.execv("/usr/bin/waypipe", [
+        "waypipe", "--vsock", "-s", str(PORT_BASE + cid), "--no-gpu", "-c", "none",
+        "--display", "wayland-vmgui", "server", "--", "/usr/bin/sleep", "infinity",
+    ])
+
+
+if __name__ == "__main__":
+    main()

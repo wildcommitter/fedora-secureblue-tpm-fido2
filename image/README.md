@@ -34,6 +34,7 @@ AMD R9700 on amdgpu.
 | `uki/secure-boot-keys.sh` → `/usr/libexec/scroll-secure/secure-boot-keys` | `create` the keys (trusted machine), `enroll` them into the firmware with option ROM hashes, `status`. Use this, **not** `ujust enroll-secure-boot-keys` |
 | `files/etc/pam.d/swaylock` | Unlock = FIDO2 key + client PIN + touch, mapping file in `/etc` |
 | `../lockscreen/` (build context `lockscreen`) | hardened-unlock, a GTK4 ext-session-lock locker. Unlock = FIDO2 key + PIN + touch, **then** the account password. Bound to Mod+Alt+L, 5 min idle and suspend via `/etc/scroll/config.d/50-hardened-unlock.conf` |
+| `../vmgui/` (build context `vmgui`) | Qubes-style VM windows: `vmgui` CLI and `vmgui-host` (see `vmgui/README.md`). Virtualization is the bare set that `files/usr/libexec/scroll-secure/check-virt` allows |
 | `files/usr/share/wayland-sessions/scroll-pixman.desktop` | SDDM session: scroll with `WLR_RENDERER=pixman`. Both scroll sessions read only `/etc/scroll/config` |
 | `files/usr/lib/sddm/sddm.conf.d/zz-scroll-secure.conf`, `files/usr/libexec/scroll-secure/wayland-session` | SDDM starts Wayland sessions with a fixed environment, without the user's shell startup files |
 | `files/usr/libexec/scroll-secure/check-hardening` | Build check: PIE, full RELRO, stack protector, FORTIFY, CET on `/usr/bin/scroll` |

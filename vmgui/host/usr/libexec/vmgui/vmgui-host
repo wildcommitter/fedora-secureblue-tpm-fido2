@@ -1,0 +1,259 @@
+#!/usr/bin/python3 -I
+"""vmgui-host: show one VM's Wayland windows in the scroll session.
+
+    exec_privileged /usr/libexec/vmgui/vmgui-host <vm>      (written by `vmgui add`)
+
+scroll starts this as a privileged client (WAYLAND_SOCKET). It
+  1. creates a wp_security_context_v1 on that connection: sandbox_engine
+     "scroll-vm", app_id and instance_id <vm>. Our scroll lets only privileged
+     clients commit that engine, so a host app can't claim a VM frame. The
+     privileged connection is closed right after the commit.
+  2. runs `waypipe client` (no GPU, no compression) on the context's listener,
+     under setpriv: no new privileges, Landlock (read-only /usr and /etc, its
+     run dir, no TCP).
+  3. accepts the guest's waypipe server on vsock port 20000+CID and splices it
+     to waypipe, but only from the VM's CID (/etc/vmgui/<vm>.conf, root-owned).
+     The CID of a vsock peer is set by the host kernel; a guest can't forge it.
+
+Every window of the VM is a client of that security context: scroll's
+for_window rule on sandbox_engine/sandbox_app_id draws its border color and
+"[vm]" title, and it gets none of the privileged protocols.
+"""
+import os
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+ENGINE = "scroll-vm"
+PORT_BASE = 20000
+# Fixed paths: scroll's environment is writable by the user (environment.d), so
+# nothing here comes from it except XDG_RUNTIME_DIR.
+CONF_DIR = "/etc/vmgui"
+WAYPIPE = ["/usr/bin/waypipe", "--no-gpu", "-c", "none"]
+
+
+def die(msg):
+    print(f"vmgui-host: {msg}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def log(msg):
+    print(f"vmgui-host: {msg}", file=sys.stderr, flush=True)
+
+
+def read_conf(vm):
+    path = os.path.join(CONF_DIR, f"{vm}.conf")
+    st = os.stat(path)
+    if st.st_uid != 0 or st.st_mode & 0o022:
+        die(f"{path} must be owned by root and not group/world-writable")
+    conf = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                conf[k.strip()] = v.strip()
+    cid = conf.get("CID", "")
+    # `vmgui add` writes 3..1000000; 1 (vsock loopback) is left for the e2e.
+    if not re.fullmatch(r"[0-9]{1,7}", cid) or not 1 <= int(cid) <= 1000000 or int(cid) == 2:
+        die(f"{path}: bad CID {cid!r}")
+    return int(cid)
+
+
+# --- minimal Wayland client: just enough for wp_security_context_v1 -----------
+
+def wl_str(s):
+    b = s.encode() + b"\0"
+    return struct.pack("=I", len(b)) + b + b"\0" * (-len(b) % 4)
+
+
+class Wayland:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def send(self, obj, opcode, payload=b"", fds=()):
+        msg = struct.pack("=II", obj, ((8 + len(payload)) << 16) | opcode) + payload
+        if fds:
+            socket.send_fds(self.sock, [msg], list(fds))
+        else:
+            self.sock.sendall(msg)
+
+    def event(self):
+        while True:
+            if len(self.buf) >= 8:
+                obj, word = struct.unpack_from("=II", self.buf)
+                size = word >> 16
+                if size >= 8 and len(self.buf) >= size:
+                    body, self.buf = self.buf[8:size], self.buf[size:]
+                    return obj, word & 0xFFFF, body
+            data = self.sock.recv(4096)
+            if not data:
+                raise OSError("compositor closed the connection")
+            self.buf += data
+
+    def roundtrip(self, callback_id, on_event=None):
+        """wl_display.sync; returns once its done event arrives."""
+        self.send(1, 0, struct.pack("=I", callback_id))
+        while True:
+            obj, op, body = self.event()
+            if obj == callback_id and op == 0:
+                return
+            if obj == 1 and op == 0:          # wl_display.error
+                _, code = struct.unpack_from("=II", body)
+                n = struct.unpack_from("=I", body, 8)[0]
+                die(f"compositor error {code}: {body[12:12 + n - 1].decode(errors='replace')}")
+            if on_event:
+                on_event(obj, op, body)
+
+
+def create_security_context(vm, listen_fd, close_fd):
+    fd = os.environ.pop("WAYLAND_SOCKET", None)
+    if fd is None or not fd.isdigit():
+        die("no WAYLAND_SOCKET: start me with exec_privileged in the scroll config")
+    os.environ.pop("WAYLAND_DISPLAY", None)
+    wl = Wayland(socket.socket(fileno=int(fd)))
+
+    globals_ = {}
+
+    def on_global(obj, op, body):
+        if obj == 2 and op == 0:               # wl_registry.global
+            name, n = struct.unpack_from("=II", body)
+            globals_[body[8:8 + n - 1].decode()] = name
+
+    wl.send(1, 1, struct.pack("=I", 2))        # get_registry -> 2
+    wl.roundtrip(3, on_global)
+    iface = "wp_security_context_manager_v1"
+    if iface not in globals_:
+        die(f"compositor has no {iface} for us (not started by exec_privileged?)")
+    wl.send(2, 0, struct.pack("=I", globals_[iface]) + wl_str(iface) + struct.pack("=II", 1, 4))
+    wl.send(4, 1, struct.pack("=I", 5), fds=(listen_fd, close_fd))   # create_listener -> 5
+    wl.send(5, 1, wl_str(ENGINE))              # set_sandbox_engine
+    wl.send(5, 2, wl_str(vm))                  # set_app_id
+    wl.send(5, 3, wl_str(vm))                  # set_instance_id
+    wl.send(5, 4)                              # commit
+    wl.send(5, 0)                              # destroy (the listener stays until close_fd)
+    wl.roundtrip(6)                            # a refused commit arrives as an error here
+    wl.sock.close()                            # nothing privileged is left in this process
+
+
+# --- vsock -> waypipe relay -----------------------------------------------------
+
+def pump(src, dst):
+    try:
+        while True:
+            data = src.recv(1 << 20)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    try:
+        dst.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+def relay(conn, waypipe_sock):
+    with conn:
+        try:
+            up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            up.connect(waypipe_sock)
+        except OSError as e:
+            log(f"waypipe not reachable: {e}")
+            return
+        with up:
+            t = threading.Thread(target=pump, args=(up, conn), daemon=True)
+            t.start()
+            pump(conn, up)
+            t.join()
+
+
+def landlock(rundir):
+    """setpriv prefix: waypipe may read /usr and /etc, use its run dir, no TCP."""
+    return ["/usr/bin/setpriv", "--no-new-privs",
+            "--landlock-access", "fs",
+            "--landlock-rule", "path-beneath:execute,read-file,read-dir:/usr",
+            "--landlock-rule", "path-beneath:read-file,read-dir:/etc",
+            "--landlock-rule", "path-beneath:read-file,write-file:/dev/null",
+            "--landlock-rule", f"path-beneath:read-file,read-dir,make-sock,remove-file:{rundir}",
+            "--landlock-access", "net",
+            "--"]
+
+
+def main():
+    if len(sys.argv) != 2 or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", sys.argv[1]):
+        die("usage: vmgui-host <vm>")
+    vm = sys.argv[1]
+    cid = read_conf(vm)
+    port = PORT_BASE + cid
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or die("XDG_RUNTIME_DIR is not set")
+    rundir = os.path.join(runtime, "vmgui", vm)
+    os.makedirs(rundir, mode=0o700, exist_ok=True)
+    os.chmod(rundir, 0o700)
+    wl_path = os.path.join(rundir, "wayland")
+    wp_path = os.path.join(rundir, "waypipe")
+    for p in (wl_path, wp_path):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
+
+    listen = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listen.bind(wl_path)
+    listen.listen(64)
+    close_r, close_w = os.pipe()               # close_w lives as long as we do
+    create_security_context(vm, listen.fileno(), close_r)
+    listen.close()
+    os.close(close_r)
+    log(f"{vm}: security context ready at {wl_path}")
+
+    vs = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    vs.bind((socket.VMADDR_CID_ANY, port))
+    vs.listen(16)
+    log(f"{vm}: listening on vsock port {port} for CID {cid}")
+
+    env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_SOCKET", "DISPLAY")}
+    env["WAYLAND_DISPLAY"] = wl_path
+    cmd = landlock(rundir) + WAYPIPE + ["-s", wp_path, "client"]
+    state = {"child": None, "stop": False}
+
+    def supervise():
+        backoff = 1
+        while not state["stop"]:
+            started = time.monotonic()
+            state["child"] = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
+            rc = state["child"].wait()
+            if state["stop"]:
+                return
+            backoff = 1 if time.monotonic() - started > 30 else min(backoff * 2, 30)
+            log(f"{vm}: waypipe exited ({rc}), restarting in {backoff}s")
+            time.sleep(backoff)
+
+    def stop(*_):
+        state["stop"] = True
+        if state["child"]:
+            state["child"].terminate()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    threading.Thread(target=supervise, daemon=True).start()
+
+    while True:
+        conn, (peer, _) = vs.accept()
+        if peer != cid:
+            log(f"{vm}: refused vsock connection from CID {peer}")
+            conn.close()
+            continue
+        threading.Thread(target=relay, args=(conn, wp_path), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

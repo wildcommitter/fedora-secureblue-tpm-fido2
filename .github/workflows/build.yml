@@ -16,7 +16,7 @@ permissions: {}
 on:
   push:
     branches: [main]
-    paths: ["image/**", "lockscreen/**", ".github/workflows/build.yml"]
+    paths: ["image/**", "lockscreen/**", "vmgui/**", ".github/workflows/build.yml"]
   workflow_dispatch:
 
 concurrency:

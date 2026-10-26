@@ -1,6 +1,6 @@
 # Root filesystem of the workstation image: secureblue Sericea (hardened Fedora
-# Atomic Sway) + scroll (our hardened fork), KVM/libvirt, FIDO2 lock screen, software-rendered
-# headless session over VNC.
+# Atomic Sway) + scroll (our hardened fork), bare KVM/libvirt with Qubes-style VM
+# windows (vmgui), FIDO2 lock screen, software-rendered headless session over VNC.
 #
 # This is only the first stage. ./build.sh feeds it through uki/ to produce the
 # sealed image: composefs backend, systemd-boot + UKI signed with our own db key,
@@ -82,18 +82,37 @@ RUN --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
  && rpm -q scroll | grep -q '\.hardened\.' \
  && scroll -v | grep -q packaged
 
-# - libvirt modular daemons + swtpm/OVMF: VMs with vTPM and Secure Boot (also the
-#   tokenvault e2e lab).
+# - Bare virtualization: KVM through libvirt's QEMU driver (modular daemons:
+#   qemu, network, nodedev, secret, storage-core), swtpm and OVMF for vTPM and
+#   Secure Boot. The base ships much more (virt-manager, SPICE/GTK/SDL UIs,
+#   qemu-user, remote block/storage, Xen/VirtualBox/LXC/CH drivers, virtiofsd,
+#   guest agents, podman machine): removed here, and check-virt fails the build on
+#   anything outside its allowlist. No default NAT network. waypipe is vmgui's.
 # - pam-u2f/pamu2fcfg/fido2-tools/tpm2-tools: lock screen + LUKS token enrollment.
 # /var is a tmpfs here so nothing lands in the image's /var (bootc lint);
 # the libvirt state dirs come back via files/usr/lib/tmpfiles.d/.
 RUN --mount=type=tmpfs,target=/var \
-    dnf -y install \
-      libvirt-daemon-kvm libvirt-daemon-config-network qemu-kvm \
-      virt-manager virt-install swtpm swtpm-tools edk2-ovmf \
+    dnf -y remove \
+      virt-manager virt-manager-common virt-install virt-viewer python3-libvirt libvirt-glib \
+      libvirt-daemon-kvm libvirt-daemon-config-network libvirt-daemon-config-nwfilter \
+      libvirt-daemon-driver-ch libvirt-daemon-driver-libxl libvirt-daemon-driver-lxc \
+      libvirt-daemon-driver-vbox libvirt-daemon-driver-interface libvirt-daemon-driver-nwfilter \
+      libvirt-daemon-driver-storage 'libvirt-daemon-driver-storage-[d-z]*' \
+      libvirt-nss libvirt-ssh-proxy \
+      'qemu-audio-*' 'qemu-block-*' 'qemu-char-*' 'qemu-device-display-*' 'qemu-ui-*' 'qemu-user*' \
+      qemu-device-usb-redirect qemu-device-usb-smartcard qemu-device-uefi-vars \
+      qemu-guest-agent qemu-kvm qemu-tools qemu-pr-helper \
+      'spice-*' gvisor-tap-vsock gvisor-tap-vsock-gvforwarder \
+      virtiofsd virtualbox-guest-additions \
+ && dnf -y install --setopt=install_weak_deps=False \
+      qemu-kvm-core libvirt-daemon-driver-qemu libvirt-daemon-driver-network \
+      libvirt-daemon-driver-storage-core libvirt-client swtpm swtpm-tools edk2-ovmf waypipe \
+ && dnf -y install \
       pam-u2f pamu2fcfg fido2-tools tpm2-tools \
       wayvnc swaylock swayidle gtk4-layer-shell \
  && dnf clean all
+COPY files/usr/libexec/scroll-secure/check-virt /usr/libexec/scroll-secure/check-virt
+RUN /usr/libexec/scroll-secure/check-virt
 
 # Fail the build if the static-wlroots assumption broke and scroll needs a lib we lack,
 # or hardened-unlock's GTK4 / layer-shell libs are missing.
@@ -151,6 +170,16 @@ RUN systemctl enable \
       virtqemud.socket virtnetworkd.socket virtstoraged.socket \
       virtnodedevd.socket virtsecretd.socket virtlogd.socket
 
+# vmgui (../vmgui, the `vmgui` build context): Qubes-style VM windows. vmgui-host
+# runs per VM in the session (exec_privileged, from `vmgui add`); /etc/vmgui is
+# empty until then. The guest half (vmgui/guest) goes into the VMs, not here.
+COPY --from=vmgui host/ /
+RUN /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
+ && find /usr/libexec/vmgui -name __pycache__ -exec rm -rf {} + \
+ && bash -n /usr/bin/vmgui \
+ && /usr/bin/setpriv --help | grep -q landlock-access \
+ && ! test -e /etc/vmgui
+
 COPY files/ /
 # Wallpaper (config.d/10-desktop.conf): a key-binding cheatsheet drawn from the final
 # config. Fails the build if a key on the sheet isn't bound.
@@ -181,6 +210,8 @@ RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
 
 RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
       /usr/libexec/scroll-secure/wayland-session /usr/libexec/scroll-secure/check-hardening \
+      /usr/libexec/scroll-secure/check-virt /usr/libexec/vmgui/vmgui-host /usr/bin/vmgui \
+ && /usr/libexec/scroll-secure/check-virt \
  && bootc container lint
 
 LABEL org.opencontainers.image.title="scroll-secure" \

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# vmgui: declare which VMs may show windows in the scroll session (Qubes-style).
+#
+#   run0 vmgui add <vm> <cid> <color>   # e.g. vmgui add work 7 '#cc3333'
+#   run0 vmgui remove <vm>
+#   vmgui list
+#   vmgui xml <vm>                      # the libvirt <vsock> element for the VM
+#   vmgui run <vm> <command> [args...]  # start a guest app over ssh on vsock
+#
+# add writes /etc/vmgui/<vm>.conf (the VM's vsock CID; vmgui-host accepts only
+# that CID) and /etc/scroll/config.d/60-vmgui-<vm>.conf (starts vmgui-host as a
+# privileged client and colors the VM's windows). Both take effect at the next
+# login. The VM itself needs the vsock device from `vmgui xml` and the guest
+# addon (vmgui/guest).
+set -euo pipefail
+
+CONF_DIR=/etc/vmgui
+SCROLL_D=/etc/scroll/config.d
+PORT_BASE=20000
+
+die() { echo "vmgui: $*" >&2; exit 1; }
+usage() { sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+check_vm() {
+    [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die "VM name: lowercase letters, digits and -, at most 32"
+}
+need_root() { [[ $(id -u) -eq 0 ]] || die "run as root (run0 vmgui $*)"; }
+conf_cid() {
+    local f="$CONF_DIR/$1.conf"
+    [[ -f $f ]] || die "no VM $1 (vmgui add)"
+    sed -n 's/^CID=\([0-9]*\)$/\1/p' "$f"
+}
+
+cmd_add() {
+    [[ $# -eq 3 ]] || usage
+    local vm=$1 cid=$2 color=$3 f
+    check_vm "$vm"
+    need_root add
+    [[ $cid =~ ^[0-9]{1,7}$ ]] && ((cid >= 3 && cid <= 1000000)) || die "CID must be 3..1000000"
+    [[ $color =~ ^#[0-9a-fA-F]{6}$ ]] || die "color must be #rrggbb"
+    for f in "$CONF_DIR"/*.conf; do
+        [[ -e $f && $f != "$CONF_DIR/$vm.conf" ]] || continue
+        [[ $(sed -n 's/^CID=//p' "$f") != "$cid" ]] || die "CID $cid is already used by $(basename "$f" .conf)"
+    done
+    install -d -m 0755 "$CONF_DIR" "$SCROLL_D"
+    printf 'CID=%s\nCOLOR=%s\n' "$cid" "$color" > "$CONF_DIR/$vm.conf.tmp"
+    chmod 0644 "$CONF_DIR/$vm.conf.tmp"
+    mv "$CONF_DIR/$vm.conf.tmp" "$CONF_DIR/$vm.conf"
+    cat > "$SCROLL_D/60-vmgui-$vm.conf.tmp" <<EOF
+# vmgui: windows of VM "$vm" (written by \`vmgui add\`, read at login)
+exec_privileged /usr/libexec/vmgui/vmgui-host $vm
+for_window [sandbox_engine="^scroll-vm$" sandbox_app_id="^$vm$"] border_color $color, title_format "[$vm] %title", border normal 3
+EOF
+    chmod 0644 "$SCROLL_D/60-vmgui-$vm.conf.tmp"
+    mv "$SCROLL_D/60-vmgui-$vm.conf.tmp" "$SCROLL_D/60-vmgui-$vm.conf"
+    echo "VM $vm: CID $cid, vsock port $((PORT_BASE + cid)), color $color. Log in again to apply."
+    echo "Add to the domain (virsh edit $vm), inside <devices>:"
+    cmd_xml "$vm"
+}
+
+cmd_remove() {
+    [[ $# -eq 1 ]] || usage
+    check_vm "$1"
+    need_root remove
+    rm -f "$CONF_DIR/$1.conf" "$SCROLL_D/60-vmgui-$1.conf"
+    echo "VM $1 removed. Log in again to apply."
+}
+
+cmd_list() {
+    local f vm
+    for f in "$CONF_DIR"/*.conf; do
+        [[ -e $f ]] || continue
+        vm=$(basename "$f" .conf)
+        printf '%-20s CID=%-8s %s\n' "$vm" "$(conf_cid "$vm")" "$(sed -n 's/^COLOR=//p' "$f")"
+    done
+}
+
+cmd_xml() {
+    [[ $# -eq 1 ]] || usage
+    check_vm "$1"
+    printf "  <vsock model='virtio'>\n    <cid auto='no' address='%s'/>\n  </vsock>\n" "$(conf_cid "$1")"
+}
+
+# systemd's ssh proxy (ssh_config.d/20-systemd-ssh-proxy.conf) maps vsock/<cid>
+# to AF_VSOCK; systemd-ssh-generator in the guest puts sshd on vsock.
+cmd_run() {
+    [[ $# -ge 2 ]] || usage
+    local vm=$1
+    check_vm "$vm"
+    shift
+    exec ssh -T -o BatchMode=yes "vsock/$(conf_cid "$vm")" systemd-run --user --collect --quiet -- "$@"
+}
+
+[[ $# -ge 1 ]] || usage
+sub=$1
+shift
+case $sub in
+    add) cmd_add "$@" ;;
+    remove) cmd_remove "$@" ;;
+    list) cmd_list ;;
+    xml) cmd_xml "$@" ;;
+    run) cmd_run "$@" ;;
+    *) usage ;;
+esac

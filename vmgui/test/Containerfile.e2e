@@ -1,0 +1,9 @@
+# Test-only layer on the image rootfs for vmgui-e2e.sh: dbus for the session, and
+# optionally a scroll RPM from the `scrollrpm` context (an empty dir otherwise),
+# to test a fork branch before the image pins it.
+ARG IMAGE=localhost/scroll-secure-rootfs:latest
+FROM ${IMAGE}
+RUN --mount=type=bind,from=scrollrpm,target=/rpm \
+    if ls /rpm/scroll-[0-9]*.rpm > /dev/null 2>&1; then \
+        dnf -y install --setopt=install_weak_deps=False /rpm/scroll-[0-9]*.rpm; fi \
+ && dnf -y install dbus-daemon && dnf clean all
