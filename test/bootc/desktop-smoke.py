@@ -237,7 +237,7 @@ class Smoke:
         ev1 = self.fds(pid, "/dev/input/event")
         # The session opens a foot at login (10-desktop.conf): the binding must add one.
         foot0 = ser.value(f"pgrep -u {USER} -n -x foot || true")
-        lab.monitor("sendkey meta_l-ret")      # $mod+Return -> exec $term (foot)
+        lab.monitor("sendkey meta_l-t")        # $mod+T -> exec $term (foot)
         foot = ""
         for _ in range(20):
             foot = ser.value(f"pgrep -u {USER} -n -x foot || true")

@@ -123,41 +123,16 @@ RUN for b in /usr/bin/scroll /usr/bin/hardened-unlock; do \
 COPY files/usr/libexec/scroll-secure/check-hardening /usr/libexec/scroll-secure/check-hardening
 RUN /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
 
-# scroll is built without IPC, so the stock config's `bar {}` (scrollbar needs IPC)
-# can't work: delete the block. The sessions read only /etc/scroll/config, so a
+# The sessions read only /etc/scroll/config (our own, from files/, below), so a
 # process running as the user can't plant `exec` lines in ~/.config/scroll/config.
-# The stock $term (kitty) and $menu (wmenu-run) aren't in the image: use foot and
-# rofi. rofi is a layer-shell client, which our scroll gives only to clients it
-# starts itself, so the launcher binding uses exec_privileged.
-# The exit prompt (scrollnag, layer-shell) and the screenshot (grim, screencopy) need
-# exec_privileged too. Without IPC the prompt's `scrollmsg exit` can't work: it ends
-# the logind session instead. Edited in place: a config.d override would make scroll
-# show its "errors in your config file" bar (overwritten binding).
-RUN sed -i '/^bar {$/,/^}$/d' /etc/scroll/config \
- && ! grep -q '^bar {' /etc/scroll/config \
- && sed -i -e 's|^set \$term kitty$|set $term foot|' \
-      -e 's|^set \$menu wmenu-run$|set $menu rofi -show drun|' \
-      -e 's|^\([[:space:]]*bindsym \$mod+r\) exec \$menu$|\1 exec_privileged $menu|' \
-      -e "/^[[:space:]]*bindsym \$mod+Shift+x exec scrollnag /{s| exec scrollnag | exec_privileged scrollnag |;s|'scrollmsg exit'|'loginctl terminate-session self'|}" \
-      -e "s|^\([[:space:]]*bindsym Print\) exec grim$|\1 exec_privileged sh -c 'mkdir -p ~/Pictures/Screenshots \&\& exec grim ~/Pictures/Screenshots/\$(date +%F_%H-%M-%S).png'|" \
-      /etc/scroll/config \
- && grep -qx 'set $term foot' /etc/scroll/config \
- && grep -qx 'set $menu rofi -show drun' /etc/scroll/config \
- && grep -qE '^[[:space:]]*bindsym \$mod\+r exec_privileged \$menu$' /etc/scroll/config \
- && grep -qE "^[[:space:]]*bindsym \\\$mod\+Shift\+x exec_privileged scrollnag .*'loginctl terminate-session self'" /etc/scroll/config \
- && ! grep -q 'scrollmsg exit' /etc/scroll/config \
- && grep -qE '^[[:space:]]*bindsym Print exec_privileged sh -c .*exec grim ~/Pictures/Screenshots/' /etc/scroll/config \
- && sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
+RUN sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
       /usr/share/wayland-sessions/scroll.desktop \
  && grep -qx 'Exec=scroll -c /etc/scroll/config' /usr/share/wayland-sessions/scroll.desktop
 
 # hardened-unlock: PAM stack (FIDO2 key, then password) and the scroll snippet that
-# binds it to Mod+Alt+L, idle and suspend. The snippet only loads through the
-# config.d include, which scroll's stock config ships commented out.
+# binds it to Mod+Alt+L, idle and suspend (through our config's config.d include).
 COPY --from=lockscreen etc/pam.d/hardened-unlock /etc/pam.d/hardened-unlock
 COPY --from=lockscreen etc/scroll/config.d/ /etc/scroll/config.d/
-RUN sed -i 's|^# include /etc/scroll/config\.d/\*$|include /etc/scroll/config.d/*|' /etc/scroll/config \
- && grep -qx 'include /etc/scroll/config.d/\*' /etc/scroll/config
 
 # Duress canary: the socket-activated reset helper and its group. The canary
 # itself (/etc/hardened-unlock/duress) is set on the machine, never shipped.
@@ -181,6 +156,18 @@ RUN /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
  && ! test -e /etc/vmgui
 
 COPY files/ /
+# Our scroll config (files/etc/scroll/config, niri-style) replaces the stock one. It
+# must load with no error and no key bound twice: scroll -C exits 0 either way, and
+# a rebound key (config.d over our file) would show the red "errors in your config
+# file" bar in the session. No IPC in our build: the stock `bar {}` must not be back.
+RUN grep -q '^# scroll-secure: our own scroll config' /etc/scroll/config \
+ && grep -qx 'include /etc/scroll/config.d/\*' /etc/scroll/config \
+ && [ "$(grep -v '^[[:space:]]*#' /etc/scroll/config | grep -cE '^bar|scrollmsg')" = 0 ] \
+ && d=$(mktemp -d) \
+ && XDG_RUNTIME_DIR=$d WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+      scroll -C -d -c /etc/scroll/config > "$d/check.log" 2>&1 \
+ && if grep -E '\[ERROR\]|Overwriting binding' "$d/check.log"; then exit 1; fi \
+ && rm -rf "$d"
 # Wallpaper (config.d/10-desktop.conf): a key-binding cheatsheet drawn from the final
 # config. Fails the build if a key on the sheet isn't bound.
 RUN --mount=type=bind,source=keys-wallpaper.py,target=/tmp/keys-wallpaper.py \

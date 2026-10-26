@@ -252,9 +252,10 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
 ## Checks in the build
 
 - The rootfs fails if scroll or hardened-unlock misses a library, `/usr/bin/scroll` lacks
-  a hardening property (`check-hardening`), the `bar {}` block is still in the config, the
-  session file doesn't pin `-c /etc/scroll/config`, the config.d include isn't enabled, or
-  a tokenvault CLI dependency is missing.
+  a hardening property (`check-hardening`), our scroll config (`files/etc/scroll/config`)
+  isn't installed or doesn't load cleanly (`scroll -C`: an error, or a key bound twice),
+  the session file doesn't pin `-c /etc/scroll/config`, a key on the cheatsheet isn't
+  bound, or a tokenvault CLI dependency is missing.
 - `uki/Containerfile.base` runs `bootc container lint --fatal-warnings`.
 - The scroll RPM's `%check` fails without the hardening flags. The rootfs checks that
   `rpm -q scroll` is the `.hardened` build and that `scroll -v` says `packaged`.

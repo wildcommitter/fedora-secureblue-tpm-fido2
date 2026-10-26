@@ -1,0 +1,198 @@
+# vim: ft=swayconfig
+#
+# scroll-secure: our own scroll config, in niri's style. It replaces scroll's stock
+# /etc/scroll/config. scroll already lays windows out like niri (columns on an
+# endless horizontal strip, preset widths, an overview), so this file sets niri's
+# look, animations and keys. Where niri has no key for a scroll extra (jump labels,
+# scratchpad), the extra keeps a key that niri leaves free.
+#
+# Our scroll is built without IPC: no bar, no scrollmsg. The sessions read only this
+# file and config.d (`scroll -c /etc/scroll/config`), so a process running as the
+# user can't plant `exec` lines in ~/.config/scroll/config. Clients that need a
+# privileged protocol run through exec_privileged: rofi and scrollnag (layer-shell),
+# grim (screencopy). config.d must not rebind a key from this file: scroll would
+# show its "errors in your config file" bar.
+
+### Variables
+set $mod Mod4
+set $term foot
+set $menu rofi -show drun
+
+### Look (niri's defaults)
+# Gaps of 16 between columns and at the screen edges, no title bars.
+gaps inner 16
+gaps outer 0
+default_border pixel 4
+default_floating_border pixel 4
+# The focus ring: #7fc8ff on the active window, nothing on the rest. niri's grey
+# ring marks the active window of an unfocused monitor; scroll can't tell that apart
+# from the last-focused window of each column, so focused_inactive stays clear too.
+client.focused          #7fc8ff #7fc8ff #000000 #7fc8ff #7fc8ff
+client.focused_inactive #00000000 #00000000 #e0e0e0 #00000000 #00000000
+client.unfocused        #00000000 #00000000 #e0e0e0 #00000000 #00000000
+client.urgent           #9b0000 #9b0000 #ffffff #9b0000 #9b0000
+
+# Idle inhibit for fullscreen windows
+for_window [all] inhibit_idle fullscreen
+
+### Layout (niri: new columns take half the screen; presets 1/3, 1/2, 2/3)
+layout_default_width 0.5
+layout_default_height 1.0
+layout_widths [0.33333333 0.5 0.66666667]
+layout_heights [0.33333333 0.5 0.66666667 1.0]
+# niri doesn't center a column that fits ("center-focused-column never").
+center_horizontal_if_fits false
+# Mod+R wraps from the widest preset back to the first, like niri.
+cycle_size_wrap true
+focus_wrapping no
+# niri: no focus-follows-mouse by default. Mod + drag moves windows, Mod + right
+# drag resizes them.
+focus_follows_mouse no
+floating_modifier $mod normal
+
+### Animations (niri: springs without overshoot, short open/close)
+# A critically damped spring is close to the ease-out curve [0.25 1 0.5 1]. Window
+# open and close are niri's 150 ms ease-out-expo / ease-out-quad.
+animations {
+    enabled yes
+    default yes 300 var 3 [ 0.25 1 0.5 1 ]
+    window_open yes 150 var 3 [ 0.16 1 0.3 1 ]
+    window_move yes 300 var 3 [ 0.25 1 0.5 1 ]
+    window_move_float yes 300 var 3 [ 0.25 1 0.5 1 ]
+    window_size yes 300 var 3 [ 0.25 1 0.5 1 ]
+    workspace_switch yes 250 var 3 [ 0.25 1 0.5 1 ]
+    window_fullscreen yes 300 var 3 [ 0.25 1 0.5 1 ]
+    overview yes 300 var 3 [ 0.25 1 0.5 1 ]
+    jump yes 300 var 3 [ 0.25 1 0.5 1 ]
+    layer_shell yes 150 var 3 [ 0.16 1 0.3 1 ]
+    fade_in yes 150 var simple [ 0.16 1 0.3 1 ]
+    fade_out yes 150 var simple [ 0.25 0.46 0.45 0.94 ]
+}
+
+### Keys (niri's defaults; arrows and h/j/k/l both work)
+# Basics
+bindsym $mod+t exec $term
+bindsym $mod+d exec_privileged $menu
+bindsym $mod+q kill
+bindsym $mod+Shift+c reload
+# niri asks before quitting. Without IPC the prompt ends the logind session.
+bindsym $mod+Shift+e exec_privileged scrollnag -t warning -m 'Do you really want to log out?' -B 'Log out' 'loginctl terminate-session self' -w 500 -e center -y overlay
+# Full screen to ~/Pictures/Screenshots. niri's region pick (slurp) isn't here: it
+# would be a second layer-shell client, and only the one exec_privileged starts
+# gets the protocol.
+bindsym Print exec_privileged sh -c 'mkdir -p ~/Pictures/Screenshots && exec grim ~/Pictures/Screenshots/$(date +%F_%H-%M-%S).png'
+
+# Focus and move: columns left/right, windows in a column up/down
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+bindsym $mod+Ctrl+Left move left
+bindsym $mod+Ctrl+Down move down
+bindsym $mod+Ctrl+Up move up
+bindsym $mod+Ctrl+Right move right
+bindsym $mod+Ctrl+h move left
+bindsym $mod+Ctrl+j move down
+bindsym $mod+Ctrl+k move up
+bindsym $mod+Ctrl+l move right
+bindsym $mod+Home focus beginning
+bindsym $mod+End focus end
+bindsym $mod+Ctrl+Home move beginning
+bindsym $mod+Ctrl+End move end
+# Consume the window into the column on that side, or expel it into a new one.
+bindsym $mod+bracketleft move left nomode
+bindsym $mod+bracketright move right nomode
+
+# Monitors
+bindsym $mod+Shift+Left focus output left
+bindsym $mod+Shift+Down focus output down
+bindsym $mod+Shift+Up focus output up
+bindsym $mod+Shift+Right focus output right
+bindsym $mod+Shift+h focus output left
+bindsym $mod+Shift+j focus output down
+bindsym $mod+Shift+k focus output up
+bindsym $mod+Shift+l focus output right
+bindsym $mod+Shift+Ctrl+Left move container to output left; focus output left
+bindsym $mod+Shift+Ctrl+Down move container to output down; focus output down
+bindsym $mod+Shift+Ctrl+Up move container to output up; focus output up
+bindsym $mod+Shift+Ctrl+Right move container to output right; focus output right
+
+# Workspaces, per monitor: up/down like niri's vertical stack. Going past the last
+# one opens an empty workspace (workspace_next_on_output_create_empty).
+bindsym $mod+Page_Down workspace next_on_output
+bindsym $mod+Page_Up workspace prev_on_output
+bindsym $mod+u workspace next_on_output
+bindsym $mod+i workspace prev_on_output
+bindsym $mod+Ctrl+Page_Down move container to workspace next_on_output; workspace next_on_output
+bindsym $mod+Ctrl+Page_Up move container to workspace prev_on_output; workspace prev_on_output
+bindsym $mod+Ctrl+u move container to workspace next_on_output; workspace next_on_output
+bindsym $mod+Ctrl+i move container to workspace prev_on_output; workspace prev_on_output
+bindsym $mod+Tab workspace back_and_forth
+bindsym $mod+1 workspace number 1
+bindsym $mod+2 workspace number 2
+bindsym $mod+3 workspace number 3
+bindsym $mod+4 workspace number 4
+bindsym $mod+5 workspace number 5
+bindsym $mod+6 workspace number 6
+bindsym $mod+7 workspace number 7
+bindsym $mod+8 workspace number 8
+bindsym $mod+9 workspace number 9
+bindsym $mod+Ctrl+1 move container to workspace number 1; workspace number 1
+bindsym $mod+Ctrl+2 move container to workspace number 2; workspace number 2
+bindsym $mod+Ctrl+3 move container to workspace number 3; workspace number 3
+bindsym $mod+Ctrl+4 move container to workspace number 4; workspace number 4
+bindsym $mod+Ctrl+5 move container to workspace number 5; workspace number 5
+bindsym $mod+Ctrl+6 move container to workspace number 6; workspace number 6
+bindsym $mod+Ctrl+7 move container to workspace number 7; workspace number 7
+bindsym $mod+Ctrl+8 move container to workspace number 8; workspace number 8
+bindsym $mod+Ctrl+9 move container to workspace number 9; workspace number 9
+# Mod + wheel: workspaces; Mod + Shift + wheel: columns.
+bindsym --whole-window $mod+button4 workspace prev_on_output
+bindsym --whole-window $mod+button5 workspace next_on_output
+bindsym --whole-window $mod+Shift+button4 focus left
+bindsym --whole-window $mod+Shift+button5 focus right
+
+# Sizes
+bindsym $mod+r cycle_size h next
+bindsym $mod+Shift+r cycle_size v next
+bindsym $mod+minus resize shrink width 10 ppt
+bindsym $mod+equal resize grow width 10 ppt
+bindsym $mod+Shift+minus resize shrink height 10 ppt
+bindsym $mod+Shift+equal resize grow height 10 ppt
+# Maximize the column (again: back to its width), fullscreen, center.
+bindsym $mod+f toggle_size this 1.0 1.0
+bindsym $mod+Shift+f fullscreen
+bindsym $mod+c align center
+
+# Floating and overview
+bindsym $mod+v floating toggle
+bindsym $mod+Shift+v focus mode_toggle
+bindsym --no-repeat $mod+o scale_workspace overview
+bindgesture swipe:4:up scale_workspace overview
+bindgesture swipe:4:down scale_workspace overview
+
+# scroll extras, on keys niri leaves free
+# Jump: a label on every window, type it to focus that window.
+bindsym $mod+slash jump all
+bindsym $mod+Shift+z move scratchpad
+bindsym $mod+z scratchpad show
+
+# Media and brightness keys, also on the lock screen
+bindsym --locked XF86AudioMute exec pactl set-sink-mute \@DEFAULT_SINK@ toggle
+bindsym --locked XF86AudioLowerVolume exec pactl set-sink-volume \@DEFAULT_SINK@ -5%
+bindsym --locked XF86AudioRaiseVolume exec pactl set-sink-volume \@DEFAULT_SINK@ +5%
+bindsym --locked XF86AudioMicMute exec pactl set-source-mute \@DEFAULT_SOURCE@ toggle
+bindsym --locked XF86AudioPlay exec playerctl play-pause
+bindsym --locked XF86AudioPause exec playerctl play-pause
+bindsym --locked XF86AudioPrev exec playerctl previous
+bindsym --locked XF86AudioNext exec playerctl next
+bindsym --locked XF86AudioStop exec playerctl stop
+bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
+bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
+
+# Desktop (10-desktop.conf) and the lock screen (50-hardened-unlock.conf: Mod+Alt+L)
+include /etc/scroll/config.d/*

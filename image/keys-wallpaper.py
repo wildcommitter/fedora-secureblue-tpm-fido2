@@ -20,64 +20,58 @@ import tempfile
 # (section, [(label, description, [bindsym combos that must exist])])
 SHEET = [
     ("Basics", [
-        ("Super Enter", "terminal", ["$mod+Return"]),
-        ("Super R", "launcher", ["$mod+r"]),
-        ("Super Backspace", "close window", ["$mod+Backspace"]),
-        ("Super Shift Backspace", "close the others", ["$mod+Shift+Backspace"]),
-        ("Super Shift C", "reload config", ["$mod+Shift+c"]),
+        ("Super T", "terminal", ["$mod+t"]),
+        ("Super D", "launcher", ["$mod+d"]),
+        ("Super Q", "close window", ["$mod+q"]),
         ("Super Alt L", "lock (key PIN + touch, then password)", ["$mod+Alt+l"]),
-        ("Super Shift X", "log out (asks first)", ["$mod+Shift+x"]),
+        ("Super Shift E", "log out (asks first)", ["$mod+Shift+e"]),
+        ("Super Shift C", "reload config", ["$mod+Shift+c"]),
         ("Print", "screenshot to ~/Pictures/Screenshots", ["Print"]),
     ]),
     ("Focus and move", [
-        ("Super ←↑↓→", "focus", ["$mod+$left", "$mod+$down", "$mod+$up", "$mod+$right"]),
-        ("Super Ctrl ←↑↓→", "move window", ["$mod+Ctrl+$left", "$mod+Ctrl+$down",
-                                           "$mod+Ctrl+$up", "$mod+Ctrl+$right"]),
-        ("Super Home / End", "focus first / last", ["$mod+home", "$mod+end"]),
-        ("Super Shift ←↑↓→", "focus monitor", ["$mod+Shift+$left", "$mod+Shift+$down",
-                                              "$mod+Shift+$up", "$mod+Shift+$right"]),
-        ("Super [ / ]", "new windows go right / below",
-         ["$mod+bracketleft", "$mod+bracketright"]),
-        ("Super Y", "focus tiling ↔ floating", ["$mod+y"]),
+        ("Super ← → / H L", "focus column", ["$mod+Left", "$mod+Right", "$mod+h", "$mod+l"]),
+        ("Super ↑ ↓ / K J", "focus window in column", ["$mod+Up", "$mod+Down", "$mod+k", "$mod+j"]),
+        ("Super Ctrl + those", "move column / window",
+         ["$mod+Ctrl+Left", "$mod+Ctrl+Right", "$mod+Ctrl+Up", "$mod+Ctrl+Down",
+          "$mod+Ctrl+h", "$mod+Ctrl+l", "$mod+Ctrl+k", "$mod+Ctrl+j"]),
+        ("Super Home / End", "first / last column", ["$mod+Home", "$mod+End"]),
+        ("Super [ / ]", "window into or out of column", ["$mod+bracketleft", "$mod+bracketright"]),
+        ("Super Shift ←↑↓→", "focus monitor", ["$mod+Shift+Left", "$mod+Shift+Down",
+                                              "$mod+Shift+Up", "$mod+Shift+Right"]),
+        ("Super Shift Ctrl ←→", "move column to monitor",
+         ["$mod+Shift+Ctrl+Left", "$mod+Shift+Ctrl+Right"]),
     ]),
     ("Workspaces", [
-        ("Super 1…0", "go to workspace", ["$mod+1", "$mod+0"]),
-        ("Super Shift 1…0", "send window there", ["$mod+Shift+1", "$mod+Shift+0"]),
-        ("Super Ctrl 1…0", "swap contents", ["$mod+Ctrl+1", "$mod+Ctrl+0"]),
-        ("Super PgUp / PgDn", "previous / next", ["$mod+Page_Up", "$mod+Page_Down"]),
-        ("Super Ctrl Z", "back and forth", ["$mod+Ctrl+z"]),
-        ("Super Tab", "overview", ["$mod+tab"]),
-        ("Super Shift Tab", "all workspaces", ["$mod+Shift+tab"]),
+        ("Super U / I", "workspace down / up", ["$mod+u", "$mod+i", "$mod+Page_Down", "$mod+Page_Up"]),
+        ("Super Ctrl U / I", "move column down / up", ["$mod+Ctrl+u", "$mod+Ctrl+i"]),
+        ("Super 1…9", "go to workspace", ["$mod+1", "$mod+9"]),
+        ("Super Ctrl 1…9", "move column there", ["$mod+Ctrl+1", "$mod+Ctrl+9"]),
+        ("Super Tab", "previous workspace", ["$mod+Tab"]),
+        ("Super O", "overview", ["$mod+o"]),
     ]),
-    ("Size and layout", [
-        ("Super − / =", "cycle width", ["$mod+minus", "$mod+equal"]),
-        ("Super Shift − / =", "cycle height", ["$mod+Shift+minus", "$mod+Shift+equal"]),
-        ("Super T", "maximize toggle", ["$mod+t"]),
-        ("Super F", "fullscreen", ["$mod+f"]),
-        ("Super Shift F", "float toggle", ["$mod+Shift+f"]),
-        ("Super Shift Y", "transpose row ↔ column", ["$mod+Shift+y"]),
-        ("Super , / .", "zoom window content", ["$mod+comma", "$mod+period"]),
-        ("Super Shift , / .", "zoom workspace", ["$mod+Shift+comma", "$mod+Shift+period"]),
+    ("Size", [
+        ("Super R", "width: 1/3, 1/2, 2/3", ["$mod+r"]),
+        ("Super Shift R", "height presets", ["$mod+Shift+r"]),
+        ("Super − / =", "width −10% / +10%", ["$mod+minus", "$mod+equal"]),
+        ("Super Shift − / =", "height −10% / +10%", ["$mod+Shift+minus", "$mod+Shift+equal"]),
+        ("Super F", "maximize column", ["$mod+f"]),
+        ("Super Shift F", "fullscreen", ["$mod+Shift+f"]),
+        ("Super C", "center column", ["$mod+c"]),
     ]),
-    ("Modes (Esc leaves)", [
-        ("Super B / Shift B", "set width / height: 1…0", ["$mod+b", "$mod+Shift+b"]),
-        ("Super Shift R", "resize: arrows", ["$mod+Shift+r"]),
-        ("Super W", "fit windows to screen", ["$mod+w"]),
-        ("Super C", "align: arrows, c, m", ["$mod+c"]),
-        ("Super /", "jump: a all, w workspaces", ["$mod+slash"]),
-        ("Super Shift /", "filter windows", ["$mod+Shift+slash"]),
-        ("Super G", "spaces: 1…0 load, Shift save", ["$mod+g"]),
+    ("Floating", [
+        ("Super V", "float toggle", ["$mod+v"]),
+        ("Super Shift V", "focus floating ↔ tiling", ["$mod+Shift+v"]),
+        ("Super drag", "move window (right drag: resize)", []),
     ]),
-    ("Scratchpad and pins", [
+    ("scroll extras", [
+        ("Super /", "jump: type a window's label", ["$mod+slash"]),
         ("Super Shift Z", "send to scratchpad", ["$mod+Shift+z"]),
         ("Super Z", "show / cycle scratchpad", ["$mod+z"]),
-        ("Super A / Shift A", "pin at start / end", ["$mod+a", "$mod+Shift+a"]),
-        ("Super Insert", "select window", ["$mod+Insert"]),
     ]),
 ]
 
 W, H = 1920, 1080
-FG, DIM, ACCENT, KEY = "#d8dee9", "#7b8494", "#5e81ac", "#e5e9f0"
+FG, DIM, ACCENT, KEY = "#d8dee9", "#7b8494", "#7fc8ff", "#e5e9f0"
 MOD_ORDER = ("shift", "ctrl", "control", "alt", "mod1", "mod4", "super")
 
 
