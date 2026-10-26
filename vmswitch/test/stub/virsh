@@ -1,5 +1,7 @@
 #!/bin/sh
-# Lab stub of virsh: logs the call and the hostdev XML; fails if $STUB/virsh-fail exists.
+# Lab stub of virsh: logs the call and the hostdev XML; `list` prints $STUB/guests;
+# fails if $STUB/virsh-fail exists.
 echo "virsh $*" >> "$STUB/calls"
+for a; do case $a in list) cat "$STUB/guests" 2>/dev/null; exit 0 ;; esac; done
 for a; do case $a in *.xml) cat "$a" >> "$STUB/calls" ;; esac; done
 [ ! -e "$STUB/virsh-fail" ]

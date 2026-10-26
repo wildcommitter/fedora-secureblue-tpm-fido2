@@ -1,0 +1,250 @@
+#!/usr/bin/python3 -I
+"""vmtui: the switching table as a terminal tree table (curses, stdlib only).
+
+  run0 vmtui            interactive
+  run0 vmtui --dump     print the tree table once and exit (scripts, tests)
+
+The tree: every network (uplink and "no network" included) with its NICs, then the
+USB devices with the guest each one is on. Every change goes through the vmswitch CLI,
+so vmtui holds no rules of its own.
+
+Keys: arrows or j/k move, Enter or Space folds a branch, p plugs the NIC into a network
+(pick from a list), a attaches the USB device to a guest, x detaches it, n adds a
+network, c adds a NIC, D deletes the network or NIC under the cursor, r reloads, q quits.
+"""
+import curses
+import json
+import os
+import subprocess
+import sys
+
+VMSWITCH = os.environ.get("VMTUI_VMSWITCH", "/usr/libexec/vmswitch/vmswitch")
+VIRSH = ("virsh", "-q", "-c", "qemu:///system")
+UPLINK = "uplink"
+COLS = (("NAME", 30), ("GUEST", 14), ("NIC", 8), ("MAC / ID", 19), ("TAP / PORT", 14), ("STATE", 0))
+
+
+def vs(*args):
+    r = subprocess.run((VMSWITCH, *args), capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr.strip()
+
+
+def guests():
+    r = subprocess.run((*VIRSH, "list", "--all", "--name"), capture_output=True, text=True)
+    return sorted(g for g in r.stdout.split() if g) if r.returncode == 0 else []
+
+
+def load():
+    """(table, usb rows, error): the state as vmswitch reports it."""
+    rc, out, err = vs("show")
+    if rc:
+        return {"nets": [], "nics": {}}, [], err
+    table = json.loads(out)
+    rc, out, uerr = vs("usb", "list")
+    usb = []
+    for line in out.splitlines() if rc == 0 else []:
+        f = line.split("\t")
+        if len(f) == 6:
+            usb.append(dict(zip(("id", "target", "vidpid", "port", "on", "name"), f)))
+    return table, usb, "" if rc == 0 else f"USB: {uerr}"
+
+
+class Row:
+    def __init__(self, depth, kind, key, cells, last=False):
+        self.depth, self.kind, self.key, self.cells, self.last = depth, kind, key, cells, last
+
+
+def tree(table, usb, folded):
+    """Flatten the tree into rows: branches (net, usb) and leaves (nic, dev)."""
+    rows = []
+    groups = [(n, n) for n in table["nets"]] + [(UPLINK, "uplink (internet only)"), (None, "(no network)")]
+    for net, label in groups:
+        nics = sorted(k for k, n in table["nics"].items() if n["net"] == net)
+        if net is None and not nics:
+            continue
+        key = net if net is not None else "-"
+        mark = "▸" if key in folded else "▾"
+        rows.append(Row(0, "net", key, [f"{mark} {label}", "", "", "", "", f"{len(nics)} NIC(s)"]))
+        if key in folded:
+            continue
+        for i, k in enumerate(nics):
+            n = table["nics"][k]
+            guest, nic = k.split("/", 1)
+            state = f"10.88.{n['uplink']}.2/30" if net == UPLINK else ""
+            rows.append(Row(1, "nic", k, [k, guest, nic, n["mac"], n["tap"], state], i == len(nics) - 1))
+    mark = "▸" if "@usb" in folded else "▾"
+    rows.append(Row(0, "usb", "@usb", [f"{mark} USB", "", "", "", "", f"{len(usb)} device(s)"]))
+    if "@usb" not in folded:
+        for i, d in enumerate(usb):
+            on = d["on"] if d["on"] not in ("-", "hub") else ""
+            state = "hub (host)" if d["on"] == "hub" else d["target"]
+            rows.append(Row(1, "dev", d["id"], [d["name"] or d["vidpid"], on, "", f"#{d['id']} {d['vidpid']}",
+                                                d["port"], state], i == len(usb) - 1))
+    return rows
+
+
+def line(row):
+    prefix = "" if row.depth == 0 else ("└─ " if row.last else "├─ ")
+    cells = [prefix + row.cells[0]] + row.cells[1:]
+    return "".join(c[:w - 1].ljust(w) if w else c for c, (_, w) in zip(cells, COLS))
+
+
+def header():
+    return "".join(h.ljust(w) if w else h for h, w in COLS)
+
+
+def dump():
+    table, usb, err = load()
+    print(header())
+    for r in tree(table, usb, set()):
+        print(line(r).rstrip())
+    if err:
+        print(f"! {err}")
+
+
+class UI:
+    def __init__(self, scr):
+        self.scr, self.cur, self.folded, self.msg = scr, 0, set(), ""
+        curses.curs_set(0)
+        if curses.has_colors():
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN, -1)     # branches
+            curses.init_pair(2, curses.COLOR_YELLOW, -1)   # messages
+        self.reload()
+
+    def reload(self):
+        self.table, self.usb, err = load()
+        self.rows = tree(self.table, self.usb, self.folded)
+        self.cur = max(0, min(self.cur, len(self.rows) - 1))
+        if err:
+            self.msg = err
+
+    def run_vs(self, *args):
+        rc, _, err = vs(*args)
+        self.msg = err if rc else f"ok: vmswitch {' '.join(args)}"
+        self.reload()
+
+    def draw(self):
+        s = self.scr
+        s.erase()
+        h, w = s.getmaxyx()
+        s.addnstr(0, 0, " vmswitch  p plug  a attach  x detach  n net  c nic  D delete  r reload  q quit",
+                  w - 1, curses.A_REVERSE)
+        s.addnstr(1, 0, header(), w - 1, curses.A_BOLD)
+        top = max(0, self.cur - (h - 4))
+        for y, r in enumerate(self.rows[top:top + h - 3]):
+            attr = curses.color_pair(1) | curses.A_BOLD if r.depth == 0 else 0
+            if top + y == self.cur:
+                attr |= curses.A_REVERSE
+            s.addnstr(2 + y, 0, line(r).ljust(w - 1), w - 1, attr)
+        s.addnstr(h - 1, 0, self.msg, w - 1, curses.color_pair(2))
+        s.refresh()
+
+    def pick(self, title, items, sel=0):
+        """A list in a box over the table, starting at item <sel>; returns the chosen
+        item or None (Esc)."""
+        h, w = self.scr.getmaxyx()
+        bw = min(w - 4, max(len(title), *(len(i) for i in items)) + 6)
+        bh = min(h - 2, len(items) + 2)
+        win = curses.newwin(bh, bw, (h - bh) // 2, (w - bw) // 2)
+        win.keypad(True)
+        while True:
+            win.erase()
+            win.box()
+            win.addnstr(0, 2, f" {title} ", bw - 4, curses.A_BOLD)
+            for y, it in enumerate(items[:bh - 2]):
+                win.addnstr(1 + y, 2, it.ljust(bw - 4), bw - 4, curses.A_REVERSE if y == sel else 0)
+            win.refresh()
+            k = win.getch()
+            if k in (curses.KEY_UP, ord("k")):
+                sel = max(0, sel - 1)
+            elif k in (curses.KEY_DOWN, ord("j")):
+                sel = min(len(items) - 1, sel + 1)
+            elif k in (10, 13, curses.KEY_ENTER, ord(" ")):
+                return items[sel]
+            elif k in (27, ord("q")):
+                return None
+
+    def ask(self, prompt):
+        h, w = self.scr.getmaxyx()
+        self.scr.addnstr(h - 1, 0, prompt.ljust(w - 1), w - 1, curses.A_BOLD)
+        curses.echo()
+        curses.curs_set(1)
+        try:
+            return self.scr.getstr(h - 1, len(prompt), 40).decode().strip()
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+
+    def key(self, k):
+        row = self.rows[self.cur] if self.rows else None
+        if k in (curses.KEY_UP, ord("k")):
+            self.cur = max(0, self.cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            self.cur = min(len(self.rows) - 1, self.cur + 1)
+        elif k in (10, 13, curses.KEY_ENTER, ord(" ")) and row and row.depth == 0:
+            self.folded ^= {row.key}
+            self.reload()
+        elif k == ord("r"):
+            self.msg = ""
+            self.reload()
+        elif k == ord("p") and row and row.kind == "nic":
+            items = [*self.table["nets"], UPLINK, "- (no network)"]
+            now = self.table["nics"][row.key]["net"]
+            net = self.pick(f"plug {row.key} into", items,
+                            items.index(now) if now in items else len(items) - 1)
+            if net:
+                self.run_vs("plug", *row.key.split("/", 1), net.split()[0])
+        elif k == ord("a") and row and row.kind == "dev":
+            g = guests()
+            guest = self.pick(f"attach {row.cells[0]} to", g) if g else None
+            if not g:
+                self.msg = "no guests (virsh list)"
+            if guest:
+                self.run_vs("usb", "attach", guest, row.key)
+        elif k == ord("x") and row and row.kind == "dev":
+            if row.cells[1]:
+                self.run_vs("usb", "detach", row.cells[1], row.key)
+            else:
+                self.msg = "not on a guest"
+        elif k == ord("n"):
+            net = self.ask("new network: ")
+            if net:
+                self.run_vs("net", "add", net)
+        elif k == ord("c"):
+            g = guests()
+            guest = self.pick("NIC for guest", g) if g else self.ask("guest: ")
+            nic = self.ask("NIC name (e.g. eth0): ") if guest else ""
+            if guest and nic:
+                self.run_vs("nic", "add", guest, nic)
+        elif k == ord("D") and row and row.kind in ("net", "nic"):
+            if row.kind == "net" and row.key in (UPLINK, "-"):
+                self.msg = "built in"
+            elif self.pick(f"delete {row.key}?", ["no", "yes"]) == "yes":
+                if row.kind == "net":
+                    self.run_vs("net", "del", row.key)
+                else:
+                    self.run_vs("nic", "del", *row.key.split("/", 1))
+        elif k == ord("q"):
+            return False
+        return True
+
+    def loop(self):
+        while True:
+            self.draw()
+            if not self.key(self.scr.getch()):
+                return
+
+
+def main(argv):
+    if argv == ["--dump"]:
+        dump()
+        return
+    if argv:
+        sys.exit("usage: vmtui [--dump]")
+    os.environ.setdefault("ESCDELAY", "25")
+    curses.wrapper(lambda scr: (scr.keypad(True), UI(scr).loop()))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

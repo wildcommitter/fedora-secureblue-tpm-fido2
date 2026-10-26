@@ -71,6 +71,39 @@ vmswitch usb attach browser 5        # device 5 into the running guest
 vmswitch usb detach browser 5        # back out, blocked again
 ```
 
+## vmtui: the switching table in a terminal
+
+`run0 vmtui` shows the table as a tree in any terminal. It uses curses from Python's
+stdlib, with no toolkit. Every change goes through the `vmswitch` CLI, so vmtui holds
+no rules of its own.
+
+```
+NAME                          GUEST         NIC     MAC / ID           TAP / PORT    STATE
+▾ lan-a                                                                              1 NIC(s)
+└─ work/eth1                  work          eth1    52:54:00:49:89:15  vs88984c3363
+▾ shared                                                                             2 NIC(s)
+├─ banking/eth0               banking       eth0    52:54:00:35:21:bc  vs246c0835e4
+└─ work/eth0                  work          eth0    52:54:00:83:3c:64  vs4c15ed041a
+▾ uplink (internet only)                                                             1 NIC(s)
+└─ browser/eth0               browser       eth0    52:54:00:2c:be:2e  vs3384966324  10.88.0.2/30
+▾ USB                                                                                3 device(s)
+├─ xHCI Host Controller                             #1 1d6b:0002       usb1          hub (host)
+├─ Nitrokey 3                 browser               #5 1209:7f1d       1-2           allow
+└─ Ultra Fit (USB stick)                            #7 0781:5583       1-3           block
+```
+
+| Key | On | Does |
+|---|---|---|
+| ↑ ↓ / k j | | move |
+| Enter / Space | a branch | fold or unfold it |
+| p | a NIC | pick a network (or `uplink`, or none) from a list, which starts on the current one |
+| a / x | a USB device | attach to a guest picked from `virsh list --all`, or detach |
+| n / c | | new network; new NIC (pick the guest, type the NIC name) |
+| D | a network or NIC | delete, after a yes/no |
+| r / q | | reload / quit |
+
+`vmtui --dump` prints the tree once, for scripts.
+
 ## Tests
 
 `test/vmswitch-e2e.sh` runs the switch in a container's own network namespace, with
@@ -104,10 +137,21 @@ uid 0 in a user namespace (`unshare -r`). The checks:
 Result: 7 passed, 0 failed. The real usbguard daemon and libvirt are for the KVM e2e
 (usbguard writes the host's sysfs, so never in a container).
 
+`test/vmtui-e2e.sh` runs the real curses UI in a pty (`test/ptydrive.py`), against the
+real vmswitch in a container namespace and the stub usbguard and virsh. The checks:
+- `--dump` shows networks, NICs, uplink and USB (hub flagged)
+- `p` and the picker plug a NIC into `uplink`
+- `a` and the picker attach a device to the chosen guest
+- `n` adds a network
+- `q` exits cleanly
+
+Result: 5 passed, 0 failed. The driver sends arrows the way a terminal does once curses
+turns keypad mode on (application cursor keys, `\eOB`), one write per key.
+
 ## Not done yet
 
 | What | Plan |
 |---|---|
 | usbguard in the image | Enabled, with a first-boot policy generated from the devices present then (so the keyboard and the FIDO2 key work) |
-| TUI | A curses tree table: networks → NICs, USB devices → guest; keys to plug and attach |
+| Desktop key | Bind `run0 vmtui` in foot to a key; the picker needs polkit's password prompt in the terminal |
 | Image | Unit that runs `apply` at boot, `tmpfiles.d` for `/var/lib/vmswitch`, a KVM e2e with real guests |
