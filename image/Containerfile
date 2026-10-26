@@ -26,8 +26,8 @@ ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a3
 FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
 
 ARG SCROLL_REPO=https://github.com/wildcommitter/scroll
-ARG SCROLL_REF=scroll-secure-20261019
-ARG SCROLL_COMMIT=7c81a4373246ac89e92d5c62a9171581b5e8e3f4
+ARG SCROLL_REF=scroll-secure-20261026
+ARG SCROLL_COMMIT=83ba08612532dafc612c11b5e143723369a819f7
 
 RUN dnf -y install git rpm-build 'dnf5-command(builddep)' && dnf clean all
 

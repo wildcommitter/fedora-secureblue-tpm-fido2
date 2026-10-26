@@ -23,7 +23,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VG=$(dirname "$HERE")
 IMAGE=${IMAGE:-localhost/scroll-secure-rootfs:latest}
 TEST_IMAGE=${TEST_IMAGE:-localhost/vmgui-e2e:latest}
-W=${WORK:-$HERE/work}
+# Wiped at every run: its own subdir, so files kept next to it (a SCROLL_RPM_DIR
+# under work/) survive.
+W=${WORK:-$HERE/work/e2e}
 CT=${CT_NAME:-vmgui-e2e}
 LAB_PORT=20001     # 20000 + CID 1
 OTHER_PORT=20005   # 20000 + CID 5
@@ -39,6 +41,11 @@ trap 'rm -rf "$empty"' EXIT
 podman build -q --build-arg IMAGE="$IMAGE" --build-context scrollrpm="${SCROLL_RPM_DIR:-$empty}" \
     -t "$TEST_IMAGE" -f "$HERE/Containerfile.e2e" "$HERE" > /dev/null
 
+if [[ -n ${SCROLL_RPM_DIR:-} ]]; then
+    case $(readlink -f "$SCROLL_RPM_DIR")/ in
+        "$(readlink -f "$W")"/*) die "SCROLL_RPM_DIR is inside the work dir $W, which each run wipes" ;;
+    esac
+fi
 rm -rf "$W"
 mkdir -p "$W"
 chmod 0777 "$W"
