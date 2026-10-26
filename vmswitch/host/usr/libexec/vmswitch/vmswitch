@@ -21,6 +21,14 @@ host forwards IPv4, and only these flows (the forward chain's policy is drop).
   vmswitch plug <guest> <nic> <net>|-   move the NIC to a network (or uplink), or off all
   vmswitch apply                        recreate TAPs and the table from the state
   vmswitch xml <guest> <nic>            libvirt <interface> for the guest's domain XML
+  vmswitch usb list                     USB devices: usbguard state and the guest each is on
+  vmswitch usb attach <guest> <id>      allow device <id> (usbguard) and hot-plug it into
+                                        the running guest
+  vmswitch usb detach <guest> <id>      unplug it from the guest and block it again
+
+USB: usbguard blocks devices the policy doesn't allow. attach allows one for this
+plug-in only (not in the policy) and hands it to the guest as a libvirt hostdev; QEMU
+detaches any host driver when it claims the device. Hubs can't be attached.
 
 Root only. State: $VMSWITCH_STATE (default /var/lib/vmswitch/table.json). TAPs belong
 to $VMSWITCH_TAP_USER (default qemu), which libvirt's QEMU runs as.
@@ -35,6 +43,10 @@ import sys
 
 STATE = os.environ.get("VMSWITCH_STATE", "/var/lib/vmswitch/table.json")
 TAP_USER = os.environ.get("VMSWITCH_TAP_USER", "qemu")
+SYSFS = os.environ.get("VMSWITCH_SYSFS", "/sys")
+VIRSH = ("virsh", "-q", "-c", "qemu:///system")
+USBDEV = re.compile(r'^(\d+): (allow|block|reject) id ([0-9a-f]{4}):([0-9a-f]{4}) '
+                    r'.*?name "((?:[^"\\]|\\.)*)" .*?via-port "([^"]*)" with-interface (\S+|\{[^}]*\})')
 TABLE = "vmswitch"
 UPLINK = "uplink"
 # Never routed to from an uplink guest: this host's nets, the LAN, link-local, CGNAT,
@@ -195,6 +207,78 @@ def apply(st):
                 f.write("1")
 
 
+def usb_devices():
+    """usbguard's view: id, target, vid, pid, name, port, interface classes."""
+    devs = []
+    for line in run("usbguard", "list-devices").splitlines():
+        m = USBDEV.match(line)
+        if m:
+            i, target, vid, pid, name, port, ifs = m.groups()
+            devs.append({"id": int(i), "target": target, "vid": vid, "pid": pid,
+                         "name": name, "port": port, "hub": ifs.strip("{} ").startswith("09:")})
+    return devs
+
+
+def usb_find(dev_id):
+    for d in usb_devices():
+        if str(d["id"]) == dev_id:
+            return d
+    die(f"no USB device {dev_id} (see vmswitch usb list)")
+
+
+def hostdev_xml(d):
+    base = f"{SYSFS}/bus/usb/devices/{d['port']}"
+    try:
+        bus, dev = (int(open(f"{base}/{f}").read()) for f in ("busnum", "devnum"))
+    except (OSError, ValueError):
+        die(f"USB device {d['id']} has no sysfs node at port {d['port']}")
+    return (f"<hostdev mode='subsystem' type='usb' managed='yes'><source>"
+            f"<vendor id='0x{d['vid']}'/><product id='0x{d['pid']}'/>"
+            f"<address bus='{bus}' device='{dev}'/></source></hostdev>")
+
+
+def usb(st, args):
+    st.setdefault("usb", {})
+    if args == ["list"]:
+        for d in usb_devices():
+            on = st["usb"].get(f"{d['port']}/{d['vid']}:{d['pid']}")
+            print(f"{d['id']}\t{d['target']}\t{d['vid']}:{d['pid']}\t{d['port']}\t"
+                  f"{'hub' if d['hub'] else (on or '-')}\t{d['name']}")
+        return False
+    if len(args) != 3 or args[0] not in ("attach", "detach"):
+        die("usage: vmswitch usb list | attach|detach <guest> <id>")
+    op, guest, dev_id = args[0], check_name("guest", args[1]), args[2]
+    d = usb_find(dev_id)
+    if d["hub"]:
+        die("hubs stay on the host")
+    k = f"{d['port']}/{d['vid']}:{d['pid']}"
+    xml = hostdev_xml(d)
+    tmp = f"{STATE}.hostdev.xml"
+    with open(tmp, "w") as f:
+        f.write(xml + "\n")
+    if op == "attach":
+        if st["usb"].get(k) not in (None, guest):
+            die(f"device {dev_id} is on {st['usb'][k]}; detach it there first")
+        run("usbguard", "allow-device", str(d["id"]))
+        r = subprocess.run((*VIRSH, "attach-device", guest, tmp, "--live"), capture_output=True, text=True)
+        if r.returncode:
+            run("usbguard", "block-device", str(d["id"]))
+            die(f"attach to {guest} failed, device blocked again: {r.stderr.strip()}")
+        st["usb"][k] = guest
+    else:
+        if st["usb"].get(k) != guest:
+            die(f"device {dev_id} is not on {guest}")
+        r = subprocess.run((*VIRSH, "detach-device", guest, tmp, "--live"), capture_output=True, text=True)
+        # Blocked again even if the guest is gone (then libvirt has nothing to detach).
+        run("usbguard", "block-device", str(d["id"]))
+        del st["usb"][k]
+        if r.returncode:
+            print(f"vmswitch: detach from {guest}: {r.stderr.strip()} (device blocked anyway)",
+                  file=sys.stderr)
+    os.unlink(tmp)
+    return True
+
+
 def main(argv):
     if not argv:
         die("usage: see the header of this file (show, net, nic, plug, apply, xml)")
@@ -257,6 +341,10 @@ def main(argv):
         n["net"] = net
     elif cmd == "apply" and not args:
         pass
+    elif cmd == "usb":
+        if usb(st, args):
+            save(st)
+        return
     elif cmd == "xml" and len(args) == 2:
         k = key(*args)
         n = st["nics"].get(k) or die(f"no NIC {k}")

@@ -31,6 +31,25 @@ The `inet` table exists only while a NIC is on `uplink`, and vmswitch then turns
 **only** uplink flows. That breaks rootful container bridge networks; this image has
 none. Uplink guests are isolated from each other too. No IPv6.
 
+### USB to guests (usbguard)
+
+usbguard's policy decides what the host uses. A device the policy doesn't allow stays
+blocked, with no host driver bound.
+
+| Step | `vmswitch usb attach <guest> <id>` | `vmswitch usb detach <guest> <id>` |
+|---|---|---|
+| 1 | `usbguard allow-device <id>`: for this plug-in only, not written to the policy | `virsh detach-device --live` |
+| 2 | `virsh attach-device --live`: a `hostdev` by vendor, product **and** bus/device, so only that one device | `usbguard block-device <id>`, even if the guest is gone |
+| On failure | blocked again, nothing recorded | |
+
+- Hubs never leave the host. A device on one guest must be detached before another
+  guest can take it.
+- Between steps 1 and 2 a host driver can bind for a moment. QEMU detaches it when it
+  claims the device. A device you never want the host to drive should not be plugged in
+  while it is blocked for a guest that isn't running.
+- `vmswitch usb list` shows usbguard's id, its target, vendor:product, port, the guest
+  (or `hub`, `-`) and the name.
+
 Every change rewrites the whole table in one `nft -f` transaction (checked with
 `nft -c` first). A NIC moved to another network is cut from the old one in the same
 transaction.
@@ -47,6 +66,9 @@ vmswitch plug browser eth0 uplink    # or: routed to the internet only
 vmswitch xml browser eth0            # the <interface> for `virsh edit browser`
 vmswitch show                        # the switching table, JSON
 vmswitch apply                       # recreate TAPs and table (at boot)
+vmswitch usb list                    # USB devices, usbguard id, which guest has them
+vmswitch usb attach browser 5        # device 5 into the running guest
+vmswitch usb detach browser 5        # back out, blocked again
 ```
 
 ## Tests
@@ -70,10 +92,22 @@ The checks:
 The host's network namespace is never touched. Result: 15 passed, 0 failed. `/proc/sys`
 is read-only in a container, so turning on `ip_forward` is left to the KVM e2e.
 
+`test/vmswitch-usb-e2e.sh` tests the USB logic with stubs. `usbguard` and `virsh` are
+lab stubs in `test/stub/` that log their calls, and sysfs is a fake tree. It runs as
+uid 0 in a user namespace (`unshare -r`). The checks:
+- `list` parses usbguard's format and flags hubs
+- attach allows the device, then hot-plugs it with its bus/device
+- detach unplugs it, then blocks it
+- a failed hot-plug blocks the device again and records nothing
+- hubs, and a device already on another guest, are refused
+
+Result: 7 passed, 0 failed. The real usbguard daemon and libvirt are for the KVM e2e
+(usbguard writes the host's sysfs, so never in a container).
+
 ## Not done yet
 
 | What | Plan |
 |---|---|
-| USB to guests | usbguard blocks new devices; attaching one allows it and hot-plugs it into the guest (libvirt `hostdev`); detaching blocks it again |
+| usbguard in the image | Enabled, with a first-boot policy generated from the devices present then (so the keyboard and the FIDO2 key work) |
 | TUI | A curses tree table: networks → NICs, USB devices → guest; keys to plug and attach |
 | Image | Unit that runs `apply` at boot, `tmpfiles.d` for `/var/lib/vmswitch`, a KVM e2e with real guests |

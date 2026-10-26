@@ -1,0 +1,8 @@
+#!/bin/sh
+# Lab stub of usbguard: list-devices from $STUB/devices, every call logged.
+echo "usbguard $*" >> "$STUB/calls"
+case $1 in
+list-devices) cat "$STUB/devices" ;;
+allow-device|block-device) exit 0 ;;
+*) exit 1 ;;
+esac
