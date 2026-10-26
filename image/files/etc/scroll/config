@@ -179,6 +179,8 @@ bindgesture swipe:4:down scale_workspace overview
 # Jump: a label on every window, type it to focus that window.
 bindsym $mod+slash jump all
 bindsym $mod+Shift+z move scratchpad
+# VMs: networks and USB (vmtui, as root through run0 in a terminal).
+bindsym $mod+n exec foot -T vmtui run0 vmtui
 bindsym $mod+z scratchpad show
 
 # Media and brightness keys, also on the lock screen

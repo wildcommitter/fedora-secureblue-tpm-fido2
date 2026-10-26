@@ -35,7 +35,7 @@ trap 'rm -rf out' EXIT
 
 set -x
 podman build -t "${p}-rootfs" -f Containerfile --build-context lockscreen=../lockscreen \
-    --build-context vmgui=../vmgui .
+    --build-context vmgui=../vmgui --build-context vmswitch=../vmswitch .
 podman build -t "${p}-kernel" -f uki/Containerfile.kernel --build-arg "BASE=${p}-rootfs" .
 # --no-cache on every signing build: podman's layer cache doesn't key on secret
 # contents, so a cached layer from a build with other keys would be reused and the

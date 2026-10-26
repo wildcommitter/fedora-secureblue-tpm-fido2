@@ -63,10 +63,11 @@ SHEET = [
         ("Super Shift V", "focus floating ↔ tiling", ["$mod+Shift+v"]),
         ("Super drag", "move window (right drag: resize)", []),
     ]),
-    ("scroll extras", [
+    ("Extras", [
         ("Super /", "jump: type a window's label", ["$mod+slash"]),
         ("Super Shift Z", "send to scratchpad", ["$mod+Shift+z"]),
         ("Super Z", "show / cycle scratchpad", ["$mod+z"]),
+        ("Super N", "VMs: networks and USB (vmtui)", ["$mod+n"]),
     ]),
 ]
 

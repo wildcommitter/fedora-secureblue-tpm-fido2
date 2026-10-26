@@ -148,10 +148,23 @@ real vmswitch in a container namespace and the stub usbguard and virsh. The chec
 Result: 5 passed, 0 failed. The driver sends arrows the way a terminal does once curses
 turns keypad mode on (application cursor keys, `\eOB`), one write per key.
 
+## In the image
+
+| Piece | What |
+|---|---|
+| `/usr/bin/vmswitch`, `/usr/bin/vmtui` | The CLI (link to `/usr/libexec/vmswitch/vmswitch`) and the TUI |
+| `vmswitch.service` | `vmswitch apply` at boot, before `virtqemud`, if a table exists |
+| `vmswitch.conf` (tmpfiles) | `/var/lib/vmswitch`, 0700 root |
+| `usbguard.service` | Enabled. secureblue ships it disabled with an empty policy |
+| `usbguard-firstboot.service` | Before usbguard, only while `rules.conf` is empty: `usbguard generate-policy` allows the devices present at the first boot (with their hashes) |
+| Super N | `foot -T vmtui run0 vmtui` (run0 asks for the password in the terminal) |
+
+The first boot trusts what is plugged in then. Plug in the keyboard and the FIDO2 key for
+the lock screen, and nothing else. A device plugged in later is blocked until you allow
+it for good (`run0 usbguard allow-device -p <id>`) or attach it to a guest.
+
 ## Not done yet
 
 | What | Plan |
 |---|---|
-| usbguard in the image | Enabled, with a first-boot policy generated from the devices present then (so the keyboard and the FIDO2 key work) |
-| Desktop key | Bind `run0 vmtui` in foot to a key; the picker needs polkit's password prompt in the terminal |
-| Image | Unit that runs `apply` at boot, `tmpfiles.d` for `/var/lib/vmswitch`, a KVM e2e with real guests |
+| KVM e2e | Sealed lab image, nested guests: usbguard's first-boot policy and a real attach (vfido), the switch between two guests, `uplink` with real `ip_forward`, `vmswitch.service` at boot |

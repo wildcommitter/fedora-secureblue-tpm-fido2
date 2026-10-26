@@ -155,6 +155,18 @@ RUN /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
  && /usr/bin/setpriv --help | grep -q landlock-access \
  && ! test -e /etc/vmgui
 
+# vmswitch (../vmswitch, the `vmswitch` build context): the guests' network switch
+# (TAP + nftables, no bridge or daemon), USB to guests through usbguard, and vmtui.
+# usbguard is enabled; usbguard-firstboot writes its policy from the devices present
+# at the first boot (the image ships rules.conf empty).
+COPY --from=vmswitch host/ /
+COPY --from=vmswitch README.md /usr/share/doc/vmswitch/README.md
+RUN for f in /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui; do /usr/bin/python3 -I -m py_compile "$f"; done \
+ && find /usr/libexec/vmswitch /usr/bin -maxdepth 1 -name __pycache__ -exec rm -rf {} + \
+ && test "$(readlink /usr/bin/vmswitch)" = ../libexec/vmswitch/vmswitch \
+ && ! test -s /etc/usbguard/rules.conf \
+ && systemctl enable vmswitch.service usbguard-firstboot.service usbguard.service
+
 COPY files/ /
 # Our scroll config (files/etc/scroll/config, niri-style) replaces the stock one. It
 # must load with no error and no key bound twice: scroll -C exits 0 either way, and
@@ -198,6 +210,7 @@ RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
 RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
       /usr/libexec/scroll-secure/wayland-session /usr/libexec/scroll-secure/check-hardening \
       /usr/libexec/scroll-secure/check-virt /usr/libexec/vmgui/vmgui-host /usr/bin/vmgui \
+      /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui \
  && /usr/libexec/scroll-secure/check-virt \
  && bootc container lint
 

@@ -1,0 +1,20 @@
+# usbguard ships with an empty policy, and PresentDevicePolicy=apply-policy would then
+# block every device, the keyboard included. At the first boot this writes a policy
+# that allows the devices present then (with their hashes), before usbguard starts.
+# Devices plugged in later are blocked until allowed (usbguard allow-device -p) or
+# attached to a guest (vmswitch usb attach).
+[Unit]
+Description=usbguard: policy from the devices present at first boot
+Documentation=file:///usr/share/doc/vmswitch/README.md
+ConditionFileNotEmpty=!/etc/usbguard/rules.conf
+Before=usbguard.service
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/bin/sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf.new && test -s /etc/usbguard/rules.conf.new && mv /etc/usbguard/rules.conf.new /etc/usbguard/rules.conf'
+
+[Install]
+WantedBy=usbguard.service

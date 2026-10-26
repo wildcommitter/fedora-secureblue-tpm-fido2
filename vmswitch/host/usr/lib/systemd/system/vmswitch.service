@@ -1,0 +1,16 @@
+# Recreates the guests' TAPs and the vmswitch nftables tables from the switching
+# table, before libvirt starts guests.
+[Unit]
+Description=vmswitch: guests' TAP switch (nftables)
+Documentation=file:///usr/share/doc/vmswitch/README.md
+ConditionPathExists=/var/lib/vmswitch/table.json
+Before=virtqemud.service
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vmswitch/vmswitch apply
+
+[Install]
+WantedBy=multi-user.target
