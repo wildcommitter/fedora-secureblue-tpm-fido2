@@ -6,9 +6,19 @@
 # sealed image: composefs backend, systemd-boot + UKI signed with our own db key,
 # signed PCR 11 policy. The kernel and initramfs here are replaced there.
 #
-# Base and scroll are pinned; bump both deliberately (see README.md).
+# Base, builder images and scroll are pinned; bump them deliberately (see README.md).
+# Builds are reproducible: build.sh sets SOURCE_DATE_EPOCH and installs RPMs only from
+# rpms.lock (see REPRODUCIBLE.md). Every stage declares the ARG so RUN steps see it.
 
 ARG FEDORA_VERSION=44
+# quay.io/fedora/fedora:44 and fedora-minimal:44 (multi-arch index digests) for the
+# builder stages here and in uki/; build.sh reads MINIMAL_DIGEST from this file.
+ARG FEDORA_DIGEST=sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
+# RUN steps get no network unless they fetch a pinned input (the scroll clone, Go
+# modules against go.sum): dnf reads the frozen repo from a volume. rpmlock.py update
+# resolves against the live repos and passes RUN_NETWORK=host.
+ARG RUN_NETWORK=none
+ARG MINIMAL_DIGEST=sha256:68d638fdbfd2e0ebe21941e38301adad1675fd2ebe508a4d0e85273e915ac79e
 ARG BASE_IMAGE=ghcr.io/secureblue/sericea-main-hardened
 # 44.20261016.0, kernel 7.2.10-200.fc44 (multi-arch index digest)
 ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a32c48ebf
@@ -23,20 +33,28 @@ ARG BASE_DIGEST=sha256:f0c0433ddee9c8b85d8dd3648b0bd586d272c5312641943609a0022a3
 # Fedora's hardening flags, and the spec's %check fails the build without them
 # (check-hardening runs again in stage 3). Its wlroots is linked statically.
 # ---------------------------------------------------------------------------
-FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS scroll-build
+FROM quay.io/fedora/fedora:${FEDORA_VERSION}@${FEDORA_DIGEST} AS scroll-build
+ARG SOURCE_DATE_EPOCH
+# dnf installs from this stage's lines of rpms.lock only (rpmlock.repo: $rpmlock).
+ARG DNF_VAR_rpmlock=scroll-build
+ARG RUN_NETWORK
 
 ARG SCROLL_REPO=https://github.com/wildcommitter/scroll
-ARG SCROLL_REF=scroll-secure-20261026
-ARG SCROLL_COMMIT=83ba08612532dafc612c11b5e143723369a819f7
+ARG SCROLL_REF=scroll-secure-20261026.2
+ARG SCROLL_COMMIT=ae971c6a0582d2687569815cf163daded44c1e10
 
-RUN dnf -y install git rpm-build 'dnf5-command(builddep)' && dnf clean all
+RUN --network=${RUN_NETWORK} dnf -y install git rpm-build 'dnf5-command(builddep)' && dnf clean all
 
 # Full history: make-srpm.sh takes version and snapshot date from git.
 RUN git clone --branch "${SCROLL_REF}" "${SCROLL_REPO}" /src \
  && test "$(git -C /src rev-parse "refs/tags/${SCROLL_REF}^{commit}")" = "${SCROLL_COMMIT}" \
  && test "$(git -C /src rev-parse HEAD)" = "${SCROLL_COMMIT}"
 
-RUN srpm=$(cd /src && packaging/make-srpm.sh -o /tmp/srpm) \
+# Reproducible RPM headers, for make-srpm.sh too: the build host is fixed, and the build
+# time (also in the cookie the binary RPM copies from the SRPM) is SOURCE_DATE_EPOCH.
+RUN --network=${RUN_NETWORK} printf '%s\n' '%_buildhost scroll-secure' \
+      '%use_source_date_epoch_as_buildtime 1' > ~/.rpmmacros \
+ && srpm=$(cd /src && packaging/make-srpm.sh -o /tmp/srpm) \
  && dnf -y builddep --define 'with_hardened 1' "$srpm" \
  && rpmbuild --rebuild --with hardened "$srpm" \
  && mkdir -p /out \
@@ -48,9 +66,12 @@ RUN srpm=$(cd /src && packaging/make-srpm.sh -o /tmp/srpm) \
 # Stage 2: build hardened-unlock (../lockscreen, passed by build.sh as the
 # `lockscreen` build context). Go modules are fetched against the pinned go.sum.
 # ---------------------------------------------------------------------------
-FROM quay.io/fedora/fedora:${FEDORA_VERSION} AS lockscreen-build
+FROM quay.io/fedora/fedora:${FEDORA_VERSION}@${FEDORA_DIGEST} AS lockscreen-build
+ARG SOURCE_DATE_EPOCH
+ARG DNF_VAR_rpmlock=lockscreen-build
+ARG RUN_NETWORK
 
-RUN dnf -y install golang gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel \
+RUN --network=${RUN_NETWORK} dnf -y install golang gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel \
       gobject-introspection-devel pam-devel libxcrypt-devel \
  && dnf clean all
 
@@ -70,15 +91,22 @@ RUN --mount=type=cache,target=/root/go --mount=type=cache,target=/root/.cache/go
 # Stage 3: the bootable image.
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
+ARG SOURCE_DATE_EPOCH
+ARG DNF_VAR_rpmlock=rootfs
+ARG RUN_NETWORK
 
 COPY --from=lockscreen-build /out/ /
 
+# dnf-settle runs after every dnf step of this image: no SQLite WAL in a layer.
+COPY files/usr/libexec/scroll-secure/dnf-settle /usr/libexec/scroll-secure/dnf-settle
+
 # scroll: the local RPM from stage 1 (bind-mounted, so the file doesn't stay in the
 # image), no weak deps. /var is a tmpfs for the same reason as below.
-RUN --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
+RUN --network=${RUN_NETWORK} --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
     --mount=type=tmpfs,target=/var \
     dnf -y install --setopt=install_weak_deps=False /tmp/scroll-rpm/scroll-[0-9]*.rpm \
  && dnf clean all \
+ && /usr/libexec/scroll-secure/dnf-settle \
  && rpm -q scroll | grep -q '\.hardened\.' \
  && scroll -v | grep -q packaged
 
@@ -91,7 +119,7 @@ RUN --mount=type=bind,from=scroll-build,source=/out,target=/tmp/scroll-rpm \
 # - pam-u2f/pamu2fcfg/fido2-tools/tpm2-tools: lock screen + LUKS token enrollment.
 # /var is a tmpfs here so nothing lands in the image's /var (bootc lint);
 # the libvirt state dirs come back via files/usr/lib/tmpfiles.d/.
-RUN --mount=type=tmpfs,target=/var \
+RUN --network=${RUN_NETWORK} --mount=type=tmpfs,target=/var \
     dnf -y remove \
       virt-manager virt-manager-common virt-install virt-viewer python3-libvirt libvirt-glib \
       libvirt-daemon-kvm libvirt-daemon-config-network libvirt-daemon-config-nwfilter \
@@ -110,22 +138,23 @@ RUN --mount=type=tmpfs,target=/var \
  && dnf -y install \
       pam-u2f pamu2fcfg fido2-tools tpm2-tools \
       wayvnc swaylock swayidle gtk4-layer-shell \
- && dnf clean all
+ && dnf clean all \
+ && /usr/libexec/scroll-secure/dnf-settle
 COPY files/usr/libexec/scroll-secure/check-virt /usr/libexec/scroll-secure/check-virt
-RUN /usr/libexec/scroll-secure/check-virt
+RUN --network=${RUN_NETWORK} /usr/libexec/scroll-secure/check-virt
 
 # Fail the build if the static-wlroots assumption broke and scroll needs a lib we lack,
 # or hardened-unlock's GTK4 / layer-shell libs are missing.
-RUN for b in /usr/bin/scroll /usr/bin/hardened-unlock; do \
+RUN --network=${RUN_NETWORK} for b in /usr/bin/scroll /usr/bin/hardened-unlock; do \
         if ldd "$b" | grep -q 'not found'; then ldd "$b"; exit 1; fi; \
     done
 # ... or scroll lost a hardening property of the Fedora flags.
 COPY files/usr/libexec/scroll-secure/check-hardening /usr/libexec/scroll-secure/check-hardening
-RUN /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
+RUN --network=${RUN_NETWORK} /usr/libexec/scroll-secure/check-hardening /usr/bin/scroll
 
 # The sessions read only /etc/scroll/config (our own, from files/, below), so a
 # process running as the user can't plant `exec` lines in ~/.config/scroll/config.
-RUN sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
+RUN --network=${RUN_NETWORK} sed -i 's|^Exec=scroll$|Exec=scroll -c /etc/scroll/config|' \
       /usr/share/wayland-sessions/scroll.desktop \
  && grep -qx 'Exec=scroll -c /etc/scroll/config' /usr/share/wayland-sessions/scroll.desktop
 
@@ -137,11 +166,11 @@ COPY --from=lockscreen etc/scroll/config.d/ /etc/scroll/config.d/
 # Duress canary: the socket-activated reset helper and its group. The canary
 # itself (/etc/hardened-unlock/duress) is set on the machine, never shipped.
 COPY --from=lockscreen usr/ /usr/
-RUN systemctl enable hardened-unlock-duress.socket \
+RUN --network=${RUN_NETWORK} systemctl enable hardened-unlock-duress.socket \
  && test -x /usr/libexec/hardened-unlock/duress-reset \
  && ! test -e /etc/hardened-unlock/duress
 
-RUN systemctl enable \
+RUN --network=${RUN_NETWORK} systemctl enable \
       virtqemud.socket virtnetworkd.socket virtstoraged.socket \
       virtnodedevd.socket virtsecretd.socket virtlogd.socket
 
@@ -149,7 +178,7 @@ RUN systemctl enable \
 # runs per VM in the session (exec_privileged, from `vmgui add`); /etc/vmgui is
 # empty until then. The guest half (vmgui/guest) goes into the VMs, not here.
 COPY --from=vmgui host/ /
-RUN /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
+RUN --network=${RUN_NETWORK} /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
  && find /usr/libexec/vmgui -name __pycache__ -exec rm -rf {} + \
  && bash -n /usr/bin/vmgui \
  && /usr/bin/setpriv --help | grep -q landlock-access \
@@ -161,18 +190,20 @@ RUN /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
 # at the first boot (the image ships rules.conf empty).
 COPY --from=vmswitch host/ /
 COPY --from=vmswitch README.md /usr/share/doc/vmswitch/README.md
-RUN for f in /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui; do /usr/bin/python3 -I -m py_compile "$f"; done \
+RUN --network=${RUN_NETWORK} for f in /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui; do /usr/bin/python3 -I -m py_compile "$f"; done \
  && find /usr/libexec/vmswitch /usr/bin -maxdepth 1 -name __pycache__ -exec rm -rf {} + \
  && test "$(readlink /usr/bin/vmswitch)" = ../libexec/vmswitch/vmswitch \
  && ! test -s /etc/usbguard/rules.conf \
- && systemctl enable vmswitch.service usbguard-firstboot.service usbguard.service
+ && systemctl enable vmswitch.service usbguard-firstboot.service usbguard.service \
+ && semodule -i /usr/share/selinux/packages/vmswitch/vmswitch.cil \
+ && semodule -l | grep -qx vmswitch
 
 COPY files/ /
 # Our scroll config (files/etc/scroll/config, niri-style) replaces the stock one. It
 # must load with no error and no key bound twice: scroll -C exits 0 either way, and
 # a rebound key (config.d over our file) would show the red "errors in your config
 # file" bar in the session. No IPC in our build: the stock `bar {}` must not be back.
-RUN grep -q '^# scroll-secure: our own scroll config' /etc/scroll/config \
+RUN --network=${RUN_NETWORK} grep -q '^# scroll-secure: our own scroll config' /etc/scroll/config \
  && grep -qx 'include /etc/scroll/config.d/\*' /etc/scroll/config \
  && [ "$(grep -v '^[[:space:]]*#' /etc/scroll/config | grep -cE '^bar|scrollmsg')" = 0 ] \
  && d=$(mktemp -d) \
@@ -182,7 +213,7 @@ RUN grep -q '^# scroll-secure: our own scroll config' /etc/scroll/config \
  && rm -rf "$d"
 # Wallpaper (config.d/10-desktop.conf): a key-binding cheatsheet drawn from the final
 # config. Fails the build if a key on the sheet isn't bound.
-RUN --mount=type=bind,source=keys-wallpaper.py,target=/tmp/keys-wallpaper.py \
+RUN --network=${RUN_NETWORK} --mount=type=bind,source=keys-wallpaper.py,target=/tmp/keys-wallpaper.py \
     mkdir -p /usr/share/scroll-secure \
  && python3 -I /tmp/keys-wallpaper.py /etc/scroll/config /usr/share/scroll-secure/keys.png \
  && test -s /usr/share/scroll-secure/keys.png
@@ -195,7 +226,7 @@ COPY uki/secure-boot-keys.sh /usr/libexec/scroll-secure/secure-boot-keys
 COPY files-luks/ /
 
 # Fail the build if a tool the tokenvault CLI needs on the booted system is gone.
-RUN for b in bash cryptsetup systemd-cryptenroll /usr/lib/systemd/systemd-cryptsetup \
+RUN --network=${RUN_NETWORK} for b in bash cryptsetup systemd-cryptenroll /usr/lib/systemd/systemd-cryptsetup \
              /usr/lib/systemd/systemd-pcrextend udevadm python3 findfs blkid findmnt \
              mountpoint shred awk openssl objdump objcopy lsinitrd keyctl; do \
         command -v "$b" > /dev/null || { echo "tokenvault dep missing: $b"; exit 1; }; \
@@ -204,10 +235,10 @@ RUN for b in bash cryptsetup systemd-cryptenroll /usr/lib/systemd/systemd-crypts
 
 # tokenvault_conf_t: /etc/tokenvault (plaintext token PINs) as a security file
 # type like shadow_t, out of reach of confined domains' etc_t read rules.
-RUN semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
+RUN --network=${RUN_NETWORK} semodule -i /usr/share/selinux/packages/tokenvault/tokenvault.cil \
  && semodule -l | grep -qx tokenvault
 
-RUN chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
+RUN --network=${RUN_NETWORK} chmod 0755 /usr/libexec/scroll-headless /usr/libexec/scroll-secure/secure-boot-keys \
       /usr/libexec/scroll-secure/wayland-session /usr/libexec/scroll-secure/check-hardening \
       /usr/libexec/scroll-secure/check-virt /usr/libexec/vmgui/vmgui-host /usr/bin/vmgui \
       /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui \

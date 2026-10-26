@@ -3,12 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG RELEASE=overridden
+# scroll-secure: pinned builder image, SOURCE_DATE_EPOCH (reproducible builds)
+ARG MINIMAL_DIGEST=overridden
+ARG SOURCE_DATE_EPOCH
 
 # Capture scripts from the git repo
 FROM scratch as scripts
 COPY uki/scripts /
 
-FROM quay.io/fedora/fedora-minimal:${RELEASE} as builder
+FROM quay.io/fedora/fedora-minimal:${RELEASE}@${MINIMAL_DIGEST} as builder
+ARG SOURCE_DATE_EPOCH
+# scroll-secure: dnf sees only this stage's lines of rpms.lock
+ARG DNF_VAR_rpmlock=addons
 
 RUN --mount=type=tmpfs,target=/run \
     --mount=type=tmpfs,target=/tmp \

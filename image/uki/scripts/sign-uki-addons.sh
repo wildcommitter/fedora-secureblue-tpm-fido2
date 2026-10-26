@@ -37,9 +37,10 @@ mkdir /addons
 for addon in "${addons[@]}"; do
     # The equals symbol is not allowed in FAT32 filenames, so replace it with __.
     filename="${addon//=/__}"
+    # scroll-secure: systemd-sbsign takes signingTime from SOURCE_DATE_EPOCH (sbsign: the clock)
     ukify build \
         --cmdline "${addon}" \
-        --signtool sbsign \
+        --signtool systemd-sbsign \
         --secureboot-private-key /run/secrets/secureboot_key \
         --secureboot-certificate /run/secrets/secureboot_crt \
         --output "/addons/${filename}.addon.efi"

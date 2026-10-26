@@ -1,0 +1,28 @@
+#!/usr/bin/python3 -I
+"""dnf-settle: fold the package databases' SQLite write-ahead logs into the databases
+(reproducible builds).
+
+dnf5 (transaction_history.sqlite) and rpm (rpmdb.sqlite) run SQLite in WAL mode and leave
+-wal and -shm files behind. The WAL header holds random salts and the -shm index is
+random too, so two builds of the same layer differ there (found by repro-diff.py).
+Checkpoint each log into its database and switch it to rollback-journal mode (kept in the
+database header): SQLite then removes both files, and a reader of the read-only tree
+(chunkah, `rpm -q` on the booted system) needs none. A WAL database without -shm can't be
+opened read-only. Run in the same RUN as dnf or rpm, so the layer never holds them. See
+image/REPRODUCIBLE.md.
+"""
+import os
+import sqlite3
+import sys
+
+for db in ("/usr/lib/sysimage/libdnf5/transaction_history.sqlite",
+           "/usr/lib/sysimage/rpm/rpmdb.sqlite"):
+    if not os.path.exists(db):
+        continue
+    con = sqlite3.connect(db)
+    busy, _, _ = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    mode, = con.execute("PRAGMA journal_mode=DELETE").fetchone()
+    con.close()
+    left = [db + s for s in ("-wal", "-shm") if os.path.exists(db + s)]
+    if busy or mode != "delete" or left:
+        sys.exit(f"dnf-settle: {db}: checkpoint busy={busy}, journal_mode={mode}, left: {' '.join(left)}")

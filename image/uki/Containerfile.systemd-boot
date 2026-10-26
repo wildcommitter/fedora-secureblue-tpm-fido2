@@ -4,11 +4,19 @@
 # SPDX-License-Identifier: Apache-2.0 AND CC0-1.0
 
 ARG RELEASE=overridden
-FROM quay.io/fedora/fedora-minimal:${RELEASE} as builder
+# scroll-secure: pinned builder image, SOURCE_DATE_EPOCH (reproducible builds)
+ARG MINIMAL_DIGEST=overridden
+ARG SOURCE_DATE_EPOCH
+FROM quay.io/fedora/fedora-minimal:${RELEASE}@${MINIMAL_DIGEST} as builder
+ARG SOURCE_DATE_EPOCH
+# scroll-secure: dnf sees only this stage's lines of rpms.lock
+ARG DNF_VAR_rpmlock=systemd-boot
 
 RUN <<EORUN
 set -euxo pipefail
-dnf install -y systemd-boot-unsigned sbsigntools
+# scroll-secure: systemd-sbsign (in systemd) instead of sbsign, which puts the wall
+# clock into the signature's signingTime; systemd-sbsign takes SOURCE_DATE_EPOCH.
+dnf install -y systemd-boot-unsigned systemd
 EORUN
 
 RUN --mount=type=tmpfs,target=/run \
@@ -16,9 +24,9 @@ RUN --mount=type=tmpfs,target=/run \
     --mount=type=secret,id=secureboot_crt \
     <<EORUN
 set -euxo pipefail
-sbsign \
-    --key /run/secrets/secureboot_key \
-    --cert /run/secrets/secureboot_crt \
+/usr/lib/systemd/systemd-sbsign sign \
+    --private-key /run/secrets/secureboot_key \
+    --certificate /run/secrets/secureboot_crt \
     --output /systemd-bootx64.efi \
     /usr/lib/systemd/boot/efi/systemd-bootx64.efi
 EORUN

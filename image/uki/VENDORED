@@ -1,2 +1,4 @@
 Vendored from https://github.com/secureblue/secureblue uki/ at 34492569d75bd5a979a80aa8498d834586c2efbf (2026-10-14).
 Local changes are marked "scroll-secure:".
+Containerfile.chunked is ours: the last stage of Containerfile.base (FROM oci:out), split
+into its own build so that it reads ./out only after chunkah has written it.

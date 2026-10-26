@@ -3,6 +3,8 @@
 
 ARG BASE=overridden
 FROM $BASE as rootfs
+# scroll-secure: SOURCE_DATE_EPOCH in every stage with a RUN (repro-lint P3)
+ARG SOURCE_DATE_EPOCH
 
 RUN <<EORUN
 set -euxo pipefail

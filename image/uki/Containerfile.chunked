@@ -1,0 +1,10 @@
+# scroll-secure: split from Containerfile.base. build.sh builds it after Containerfile.base
+# (--target chunkah) has written ./out, so oci:out always names chunkah's output: in one
+# build buildah may resolve this FROM before the chunkah stage has run.
+
+# Create the final base image from the rechunked oci output
+FROM oci:out as rootfs-chunked
+LABEL containers.bootc 1
+ENV container=oci
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

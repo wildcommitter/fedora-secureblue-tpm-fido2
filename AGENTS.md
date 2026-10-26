@@ -81,6 +81,17 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 SECRETS_DIR=... image/build.sh [tag]      # full sealed build; needs uki/keys + db.key + PCR.key
 lockscreen/build.sh                       # Fedora 44 container -> lockscreen/out/; runs go vet + go test
 image/uki/secure-boot-keys.sh create      # new key hierarchy (refuses to overwrite)
+python3 -I image/rpmlock.py update        # re-resolve rpms.lock against the live repos (any dnf change)
+```
+
+The build is reproducible (`image/REPRODUCIBLE.md`): pinned digests, `rpms.lock` served
+per stage as the only repo, `RUN --network=none`, `SOURCE_DATE_EPOCH`, `systemd-sbsign`.
+`build.sh` runs `image/repro-lint.py` (P1–P10) first; keep it passing, and add a mutation to
+`image/repro-lint-test.sh` for each new premise. Check with two builds:
+
+```sh
+NO_CACHE=1 BUILD_PREFIX=localhost/a SOURCE_DATE_EPOCH=... image/build.sh localhost/a:uki   # and b
+python3 -I image/repro-diff.py localhost/a:uki localhost/b:uki                             # exit 0
 ```
 
 The image build runs `bootc container lint --fatal-warnings` (in `uki/Containerfile.base`)
@@ -114,10 +125,12 @@ lockscreen/test/pam-e2e.sh                             # PAM stack with the virt
 lockscreen/test/gui-e2e.sh                             # locker under headless scroll + wtype
 lockscreen/test/duress-e2e.sh                          # duress canary, duresstest build (marker, no reset)
 test/bootc/duress-vm-e2e.py --work <w>                 # the real duress hard reset, inside a VM
+test/bootc/vmswitch-vm-e2e.py --work <w>               # vmswitch, usbguard, guests (nested KVM) on the sealed image
 vmgui/test/vmgui-e2e.sh                                # VM windows: headless scroll + vsock loopback (container)
 vmswitch/test/vmswitch-e2e.sh                          # switch + uplink: TAPs and nft in a container netns
 vmswitch/test/vmswitch-usb-e2e.sh                      # USB attach logic, stub usbguard/virsh
 vmswitch/test/vmtui-e2e.sh                             # the TUI in a pty against the real switch
+image/repro-lint-test.sh                               # repro-lint catches each broken premise (mutations)
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
@@ -177,6 +190,13 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
 - **Duress reset vs `-no-reboot`:** the harness starts QEMU with `-no-reboot`, so a guest
   reset ends QEMU. `duress-vm-e2e.py` boots with `no_reboot=False` to watch the reset and
   the next boot on one serial log.
+
+- **SQLite in the image:** rpm's and dnf5's databases run in WAL mode. Their `-wal`/`-shm`
+  files are random (not reproducible), and without `-shm` a WAL database can't be opened
+  read-only (chunkah, `rpm -q` on the booted `/usr`). `dnf-settle` checkpoints and switches
+  them to rollback-journal mode; run it after any dnf or rpm step in a shipped stage.
+- **`FROM oci:out`** in the same build as the chunkah stage that writes `./out` races:
+  buildah can resolve it first. It lives in `uki/Containerfile.chunked`, its own build.
 
 ## Git
 

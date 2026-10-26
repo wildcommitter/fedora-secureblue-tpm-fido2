@@ -19,7 +19,11 @@ ukifyargs=(
     --measure
     --json pretty
     --output "${output}/${kver}.efi"
-    --signtool sbsign
+    # scroll-secure: systemd-sbsign takes signingTime from SOURCE_DATE_EPOCH (sbsign: the clock)
+    --signtool systemd-sbsign
+    # scroll-secure: systemd-sbsign can't tell whether the kernel is signed, so say what
+    # sbverify found: the kernel carries secureblue's signature and stays as it is
+    --no-sign-kernel
     --secureboot-private-key "${secrets}/secureboot_key"
     --secureboot-certificate "${secrets}/secureboot_crt"
     --pcr-private-key "${secrets}/pcr_key"

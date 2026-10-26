@@ -6,6 +6,9 @@
 ARG BASE=overridden
 ARG KERNEL=overridden
 ARG RELEASE=overridden
+# scroll-secure: pinned builder image, SOURCE_DATE_EPOCH (reproducible builds)
+ARG MINIMAL_DIGEST=overridden
+ARG SOURCE_DATE_EPOCH
 
 # Capture scripts from the git repo
 FROM scratch as scripts
@@ -17,13 +20,18 @@ FROM $BASE as rootfs
 
 # Rebuild the initramfs now that dracut's configuration is complete.
 FROM rootfs as initramfs
+# scroll-secure: dracut --reproducible takes its timestamps from SOURCE_DATE_EPOCH
+ARG SOURCE_DATE_EPOCH
 RUN --mount=type=tmpfs,target=/run \
     --mount=type=tmpfs,target=/tmp \
     --mount=type=tmpfs,target=/var/tmp \
     --mount=type=bind,from=scripts,src=/,target=/run/scripts \
     /run/scripts/rebuild-initrd.sh
 
-FROM quay.io/fedora/fedora-minimal:${RELEASE} as sealed-uki
+FROM quay.io/fedora/fedora-minimal:${RELEASE}@${MINIMAL_DIGEST} as uki-tools
+ARG SOURCE_DATE_EPOCH
+# scroll-secure: dnf sees only this stage's lines of rpms.lock
+ARG DNF_VAR_rpmlock=uki-tools
 # Install prerequisites.
 RUN --mount=type=tmpfs,target=/run \
     --mount=type=tmpfs,target=/tmp \
@@ -34,6 +42,9 @@ dnf install -y systemd-ukify sbsigntools jq
 dnf install -y --enablerepo=updates-testing --refresh bootc
 EORUN
 
+# scroll-secure: the tools stage on its own, so rpmlock.py can build it alone
+FROM uki-tools as sealed-uki
+ARG SOURCE_DATE_EPOCH
 # Copy the kernel and the initramfs into the image to build the UKI.
 COPY --from=kernel /vmlinuz /vmlinuz
 COPY --from=initramfs /initramfs /initramfs

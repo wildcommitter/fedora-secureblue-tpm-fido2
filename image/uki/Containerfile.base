@@ -16,13 +16,19 @@ FROM $SYSTEMDBOOT as systemd-boot
 FROM $UKIADDONS as uki-addons
 
 FROM $BASE as rootfs-base
+# scroll-secure: SOURCE_DATE_EPOCH for the RUN steps (reproducible builds); dnf
+# sees only this stage's lines of rpms.lock
+ARG SOURCE_DATE_EPOCH
+ARG DNF_VAR_rpmlock=rootfs-base
 
 # General changes done to the base image
+# scroll-secure: dnf-settle folds dnf5's SQLite WAL (random salts) into its database
 RUN --mount=type=tmpfs,target=/run \
     --mount=type=tmpfs,target=/tmp \
     --mount=type=tmpfs,target=/var \
     --mount=type=bind,from=scripts,src=/,target=/run/scripts \
-    /run/scripts/prepare-rootfs.sh
+    /run/scripts/prepare-rootfs.sh \
+ && /usr/libexec/scroll-secure/dnf-settle
 
 # Replace Fedora's systemd-boot with our signed one
 COPY --from=systemd-boot /systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
@@ -37,18 +43,26 @@ COPY uki/keys/*/*.esl uki/keys/GUID /usr/share/secureblue/uki/keys/
 
 # Make sure we pass the lints
 FROM rootfs-base as lint
+# scroll-secure: SOURCE_DATE_EPOCH in every stage with a RUN (repro-lint P3)
+ARG SOURCE_DATE_EPOCH
 RUN --mount=type=bind,from=scripts,src=/,target=/run/scripts \
     bootc container lint --fatal-warnings --no-truncate --skip nonempty-run-tmp
 
 # Remove the kernel and initrd from the base image
 FROM rootfs-base as rootfs
+ARG SOURCE_DATE_EPOCH
+# scroll-secure: dnf-settle last, as chunkah takes the whole tree: no SQLite -wal/-shm
 RUN --mount=type=bind,from=scripts,src=/,target=/run/scripts \
-    /run/scripts/remove-kernel-initrd.sh
+    /run/scripts/remove-kernel-initrd.sh \
+ && /usr/libexec/scroll-secure/dnf-settle
 
 # Rechunk container image to ensure that we compute the correct composefs hash
 # - Use more layers (128)
 # - Ignore legacy ostree folders
-FROM quay.io/coreos/chunkah AS chunkah
+# scroll-secure: pinned (amd64 manifest), and SOURCE_DATE_EPOCH caps the mtime of files
+# that have no RPM build time and sets the image's creation time.
+FROM quay.io/coreos/chunkah@sha256:a2c6ef1cbf47f0c2360fd3c8e580ada5c809f17b2ffc4b0bff9fa5083b980769 AS chunkah
+ARG SOURCE_DATE_EPOCH
 RUN --mount=from=rootfs,src=/,target=/chunkah,ro \
     --mount=type=bind,target=/run/src,rw \
         chunkah build \
@@ -57,9 +71,5 @@ RUN --mount=from=rootfs,src=/,target=/chunkah,ro \
             --prune /sysroot/ostree \
             --output oci:/run/src/out
 
-# Create the final base image from the rechunked oci output
-FROM oci:out as rootfs-chunked
-LABEL containers.bootc 1
-ENV container=oci
-STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+# scroll-secure: the final stage (FROM oci:out) is uki/Containerfile.chunked, a build of
+# its own. In one build buildah may resolve oci:out before chunkah has written ./out.
