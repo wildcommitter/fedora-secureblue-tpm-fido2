@@ -1,0 +1,200 @@
+#!/usr/bin/python3 -I
+"""vmswitch: the guests' network switch, made of TAP devices and one nftables table.
+
+Every guest NIC is a persistent TAP (vsXXXXXXXXXX). Networks are named groups of NICs.
+The `netdev vmswitch` table hooks each TAP: at ingress, a frame from the NIC's own MAC
+is duplicated to the other TAPs of its network, then dropped; at egress, only frames
+from a peer on the same network pass, so the host's own frames are dropped. So guests on one network share an Ethernet segment (a hub, no MAC
+learning), guests on different networks or on none see nothing, and the host stack
+never takes part. No bridge, no daemon: the kernel and nft do the switching.
+
+  vmswitch show                         the switching table (JSON)
+  vmswitch net add|del <net>
+  vmswitch nic add <guest> <nic>        create the NIC's TAP (not on any network)
+  vmswitch nic del <guest> <nic>
+  vmswitch plug <guest> <nic> <net>|-   move the NIC to a network, or off all networks
+  vmswitch apply                        recreate TAPs and the table from the state
+  vmswitch xml <guest> <nic>            libvirt <interface> for the guest's domain XML
+
+Root only. State: $VMSWITCH_STATE (default /var/lib/vmswitch/table.json). TAPs belong
+to $VMSWITCH_TAP_USER (default qemu), which libvirt's QEMU runs as.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+STATE = os.environ.get("VMSWITCH_STATE", "/var/lib/vmswitch/table.json")
+TAP_USER = os.environ.get("VMSWITCH_TAP_USER", "qemu")
+TABLE = "vmswitch"
+NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def die(msg):
+    sys.exit(f"vmswitch: {msg}")
+
+
+def check_name(kind, name):
+    if not NAME.match(name):
+        die(f"bad {kind} name {name!r} (a-z 0-9 _ -, up to 32, starts alnum)")
+    return name
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+    except FileNotFoundError:
+        st = {}
+    st.setdefault("nets", [])
+    st.setdefault("nics", {})
+    return st
+
+
+def save(st):
+    tmp = STATE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(st, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, STATE)
+
+
+def key(guest, nic):
+    return f"{check_name('guest', guest)}/{check_name('nic', nic)}"
+
+
+def derive(k):
+    """TAP name (15 chars max) and a locally administered MAC from guest/nic."""
+    h = hashlib.sha256(k.encode()).hexdigest()
+    return "vs" + h[:10], "52:54:00:" + ":".join(h[10 + 2 * i:12 + 2 * i] for i in range(3))
+
+
+def run(*cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if r.returncode:
+        die(f"{' '.join(cmd)}: {r.stderr.strip() or r.returncode}")
+    return r.stdout
+
+
+def tap_exists(tap):
+    return os.path.exists(f"/sys/class/net/{tap}")
+
+
+def tap_create(tap):
+    if not tap_exists(tap):
+        run("ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", TAP_USER, "group", TAP_USER)
+    # No IPv6 link-local address and no ARP from the host on a guest's wire (the
+    # egress hook drops the rest).
+    run("ip", "link", "set", "dev", tap, "addrgenmode", "none", "arp", "off", "up")
+
+
+def tap_delete(tap):
+    if tap_exists(tap):
+        run("ip", "tuntap", "del", "dev", tap, "mode", "tap")
+
+
+def ruleset(st):
+    """The whole table, replaced in one nft transaction."""
+    out = [f"table netdev {TABLE}", f"delete table netdev {TABLE}", f"table netdev {TABLE} {{"]
+    for k in sorted(st["nics"]):
+        n = st["nics"][k]
+        tap, mac = n["tap"], n["mac"]
+        peers = sorted((st["nics"][p]["tap"], st["nics"][p]["mac"]) for p in st["nics"]
+                       if p != k and n["net"] is not None and st["nics"][p]["net"] == n["net"])
+        out.append(f"  chain in_{tap} {{")
+        out.append(f'    type filter hook ingress device "{tap}" priority filter; policy drop;')
+        out.append(f"    # {k} on {n['net'] or '(no network)'}")
+        for p, _ in peers:
+            out.append(f'    ether saddr {mac} dup to "{p}"')
+        out.append("  }")
+        # dup'd frames pass the egress hook too: let through only a peer's frames on
+        # this network. Everything else, the host's own frames included, is dropped.
+        out.append(f"  chain out_{tap} {{")
+        out.append(f'    type filter hook egress device "{tap}" priority filter; policy drop;')
+        if peers:
+            out.append(f"    ether saddr {{ {', '.join(m for _, m in peers)} }} accept")
+        out.append("  }")
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def apply(st):
+    for n in st["nics"].values():
+        tap_create(n["tap"])
+    rs = ruleset(st)
+    run("nft", "-c", "-f", "-", input=rs)
+    run("nft", "-f", "-", input=rs)
+
+
+def main(argv):
+    if not argv:
+        die("usage: see the header of this file (show, net, nic, plug, apply, xml)")
+    if os.geteuid() != 0 and argv[0] not in ("xml",):
+        die("run as root")
+    os.makedirs(os.path.dirname(STATE), mode=0o700, exist_ok=True)
+    lock = open(STATE + ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    st = load()
+    cmd, args = argv[0], argv[1:]
+    if cmd == "show" and not args:
+        json.dump(st, sys.stdout, indent=1, sort_keys=True)
+        print()
+        return
+    if cmd == "net" and len(args) == 2 and args[0] in ("add", "del"):
+        net = check_name("network", args[1])
+        if args[0] == "add":
+            if net in st["nets"]:
+                die(f"network {net} exists")
+            st["nets"].append(net)
+            st["nets"].sort()
+        else:
+            if net not in st["nets"]:
+                die(f"no network {net}")
+            st["nets"].remove(net)
+            for n in st["nics"].values():
+                if n["net"] == net:
+                    n["net"] = None
+    elif cmd == "nic" and len(args) == 3 and args[0] in ("add", "del"):
+        k = key(args[1], args[2])
+        if args[0] == "add":
+            if k in st["nics"]:
+                die(f"NIC {k} exists")
+            tap, mac = derive(k)
+            if any(n["tap"] == tap for n in st["nics"].values()):
+                die(f"TAP name clash for {k}")
+            st["nics"][k] = {"tap": tap, "mac": mac, "net": None}
+        else:
+            n = st["nics"].pop(k, None) or die(f"no NIC {k}")
+            apply(st)          # drop its chains before the device goes
+            tap_delete(n["tap"])
+            save(st)
+            return
+    elif cmd == "plug" and len(args) == 3:
+        k = key(args[0], args[1])
+        if k not in st["nics"]:
+            die(f"no NIC {k}")
+        net = None if args[2] == "-" else check_name("network", args[2])
+        if net is not None and net not in st["nets"]:
+            die(f"no network {net}")
+        st["nics"][k]["net"] = net
+    elif cmd == "apply" and not args:
+        pass
+    elif cmd == "xml" and len(args) == 2:
+        k = key(*args)
+        n = st["nics"].get(k) or die(f"no NIC {k}")
+        print(f"<interface type='ethernet'>\n  <mac address='{n['mac']}'/>\n"
+              f"  <target dev='{n['tap']}' managed='no'/>\n  <model type='virtio'/>\n"
+              f"</interface>")
+        return
+    else:
+        die(f"bad command: {' '.join(argv)}")
+    apply(st)
+    save(st)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
