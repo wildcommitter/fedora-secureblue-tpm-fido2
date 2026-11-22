@@ -101,6 +101,11 @@ any layer. CI checks that the secrets match the committed public keys before bui
 by `coreos-installer`) and embeds only `uki/install.sh`, the db certificate, `cosign.pub`
 and the image reference. Boot it and run `sudo scroll-secure-install`.
 
+`iso/build-iso.sh --payload DIR` writes a raw USB image instead: the same ISO plus an ext4
+partition `SCROLL-PAYLOAD` with the llm payload (`llm/payload.sh`). `install.sh` copies it
+into the new system (`iso/install-payload.sh`) and the first boot imports it, see
+`llm/README.md`. The model's licence is unknown: that image stays local, never in a release.
+
 ## Before you install: checks on the real machine
 
 The KVM e2e (`test/bootc`) tests the unlock logic with a virtual TPM, a virtual FIDO2 key

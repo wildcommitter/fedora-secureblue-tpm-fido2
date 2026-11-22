@@ -8,8 +8,11 @@ enforcing.
 
   1. Before import: the llm user and /var/lib/llm exist, llm.service and
      llm-proxy.socket stay off (no model).
-  2. llm import from a payload filesystem (/dev/vdb, label SCROLL-PAYLOAD:
-     SHA256SUMS, llm-server.oci.tar, the model): checks, loads, starts. The server
+  2. The installer's path, then llm import by hand: install-payload.sh stages the
+     payload filesystem (/dev/vdb, label SCROLL-PAYLOAD: SHA256SUMS,
+     llm-server.oci.tar, the model) into /var/lib/llm/payload; after a reboot
+     llm-firstboot.service imports it (checks, loads, moves, starts) and removes it.
+     Then `llm import` from the filesystem again (idempotent). The server
      process runs as llm, no capabilities, no_new_privs, the host's user namespace,
      a network namespace with only lo, container_t.
   3. The guests' endpoint 10.89.255.1:8080 on vmswitch's llm network (a NIC plugged
@@ -73,6 +76,7 @@ def payload(work, model):
             f.write(f"{sha256(src)}  {name}\n")
     shutil.copy(os.path.join(ROOT, "vmgui/guest/linux/common/usr/bin/llmctl"), os.path.join(d, "llmctl"))
     shutil.copy(os.path.join(ROOT, "vmswitch/test/tapprobe.py"), os.path.join(d, "tapprobe.py"))
+    shutil.copy(os.path.join(ROOT, "image/iso/install-payload.sh"), os.path.join(d, "install-payload.sh"))
     size = sum(os.path.getsize(os.path.join(d, n)) for n in os.listdir(d)) * 11 // 10 + (64 << 20)
     if os.path.exists(img):
         os.unlink(img)
@@ -147,8 +151,22 @@ def main():
         ser.check("mkdir -p /mnt/payload && mount -o ro,noload LABEL=SCROLL-PAYLOAD /mnt/payload")
         # The lab VM has no GPU: run on the CPU.
         ser.check("mkdir -p /etc/llm && printf 'DEVICE=none\\nCTX=4096\\nSLOTS=2\\n' > /etc/llm/llm.conf")
+        # As install.sh does from the live system, here into the running system's /var.
+        out = ser.check("/mnt/payload/install-payload.sh /var 2>&1; echo rc=$?", 900)
+        step("install-payload.sh staged the payload", "rc=0" in out
+             and ser.value("cd /var/lib/llm/payload && sha256sum --quiet -c SHA256SUMS && echo ok") == "ok",
+             out.strip()[-300:])
+        ser.send("systemctl reboot")
+        ser.expect(r"reboot: Restarting system", 300)
+        recovery_boot(lab, ser)
+        got = wait_for(ser, "systemctl show -P ActiveState llm-firstboot.service", lambda v: v != "activating", 1200, 5)
+        step("llm-firstboot imported it at boot",
+             got == "active" and ser.value("systemctl show -P Result llm-firstboot.service") == "success",
+             got + " " + ser.check("journalctl -b -u llm-firstboot --no-pager | tail -8"))
+        step("payload removed after import", ser.value("test -e /var/lib/llm/payload || echo gone") == "gone")
+        ser.check("mkdir -p /mnt/payload && mount -o ro,noload LABEL=SCROLL-PAYLOAD /mnt/payload")
         out = ser.check("llm import /mnt/payload 2>&1; echo rc=$?", 1200)
-        step("llm import", "rc=0" in out, out.strip()[-400:])
+        step("llm import by hand (again)", "rc=0" in out, out.strip()[-400:])
         got = wait_for(ser, "curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket /run/llm/llm.sock http://x/health",
                        lambda v: v == "200", 600)
         step("server up on /run/llm/llm.sock", got == "200",
@@ -245,7 +263,7 @@ def main():
                        lambda v: v == "200", 600)
         step("server back after reboot", got == "200", ser.value("systemctl is-active llm.service llm-proxy.socket | tr '\\n' ' '"))
         step("llm keeps its uid", ser.value("id -u llm") == uid)
-        # Both boots (the import ran in the first).
+        # Every boot (the staging ran in the first, the import in the second).
         avc = ser.check("ausearch -m AVC -ts yesterday 2>/dev/null | grep -E "
                         "'scontext=[^ ]*:(container|container_runtime|spc)_t|comm=\"(llama-server|podman|conmon|crun|systemd-socket-|llm|llm-run|python3)\"' "
                         "|| true")

@@ -5,6 +5,8 @@
   llm import DIR              a payload dir: SHA256SUMS, llm-server.oci.tar, one .gguf;
                               checks every sha256, loads the image, adds the model,
                               creates the API key if there is none, starts the server
+  llm import --consume DIR    the same, but moves the model (same filesystem) and removes
+                              DIR afterwards: the installer's payload (llm-firstboot.service)
   llm use SHA256              select a model already in /var/lib/llm/models
   llm key [show|rotate]       the API key guests send (Authorization: Bearer ...)
   llm allow CID / deny CID    the guests llmctl answers (/etc/llm/clients.conf)
@@ -101,7 +103,7 @@ def status():
     print(f"llmctl CIDs          {' '.join(map(str, cids())) or 'none (llm allow CID)'}")
 
 
-def import_(d):
+def import_(d, consume=False):
     sums = {}
     with open(os.path.join(d, "SHA256SUMS")) as f:
         for line in f:
@@ -127,9 +129,12 @@ def import_(d):
     sha = sums[ggufs[0]]
     dst = os.path.join(STATE, "models", sha + ".gguf")
     if not os.path.exists(dst):
-        print(f"llm: copying {ggufs[0]} -> {dst}", flush=True)
+        print(f"llm: {'moving' if consume else 'copying'} {ggufs[0]} -> {dst}", flush=True)
         tmp = dst + ".tmp"
-        shutil.copyfile(os.path.join(d, ggufs[0]), tmp)
+        if consume:
+            os.rename(os.path.join(d, ggufs[0]), tmp)
+        else:
+            shutil.copyfile(os.path.join(d, ggufs[0]), tmp)
         os.chmod(tmp, 0o640)
         shutil.chown(tmp, "root", "llm")
         if sha256(tmp) != sha:
@@ -140,6 +145,8 @@ def import_(d):
         select(sha)
     if not has_key():
         make_key()
+    if consume:
+        shutil.rmtree(d)
     run("systemctl", "enable", "--now", *UNITS)
     print(f"llm: serving {current()}; guests need the key (llm key show) and a NIC on vmswitch's llm network")
 
@@ -167,6 +174,8 @@ def main(argv):
         status()
     elif verb == "import" and len(args) == 1:
         import_(args[0])
+    elif verb == "import" and len(args) == 2 and args[0] == "--consume":
+        import_(args[1], consume=True)
     elif verb == "use" and len(args) == 1:
         use(args[0])
     elif verb == "key" and args in ([], ["show"]):
@@ -184,7 +193,7 @@ def main(argv):
         write_cids(new)
         run("systemctl", "enable", "--now", "llmctl.service")
     else:
-        die("usage: llm status | import DIR | use SHA256 | key [show|rotate] | allow CID | deny CID")
+        die("usage: llm status | import [--consume] DIR | use SHA256 | key [show|rotate] | allow CID | deny CID")
 
 
 if __name__ == "__main__":

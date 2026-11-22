@@ -4,8 +4,14 @@
 # config that drops in uki/install.sh, the db cert (for the shim/MOK option),
 # the cosign public key and the image reference. Nothing else is changed.
 #
-#   image/iso/build-iso.sh <image ref> [out dir]
+#   image/iso/build-iso.sh [--payload DIR] <image ref> [out dir]
 #   image/iso/build-iso.sh ghcr.io/<owner>/scroll-secure:uki out/
+#
+# --payload DIR (llm/payload.sh makes one: SHA256SUMS, llm-server.oci.tar, one .gguf)
+# writes a raw USB image instead: the ISO, then an ext4 partition SCROLL-PAYLOAD with
+# DIR's files. install.sh copies them into the new system and llm-firstboot.service
+# imports them (llm/README.md). The model's licence is unknown: such an image stays on
+# this machine, never in a release. Write it with dd; it needs a USB stick as large.
 #
 # Boot it, then run `sudo scroll-secure-install` on the console. The installer
 # pulls the image only if its cosign signature verifies against the embedded key.
@@ -14,16 +20,30 @@ set -euo pipefail
 
 die() { echo "build-iso: $*" >&2; exit 1; }
 
-image_ref=${1:?usage: build-iso.sh <registry>/<owner>/scroll-secure:uki [out dir]}
+payload=
+if [[ "${1:-}" == --payload ]]; then
+    payload=${2:?--payload needs a directory}
+    shift 2
+fi
+image_ref=${1:?usage: build-iso.sh [--payload DIR] <registry>/<owner>/scroll-secure:uki [out dir]}
 out=${2:-out}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 image=$(dirname "${here}")
 installer=quay.io/coreos/coreos-installer:release
 
-for f in uki/install.sh uki/keys/db/db.der cosign.pub; do
+for f in uki/install.sh uki/keys/db/db.der cosign.pub iso/install-payload.sh; do
     [[ -s "${image}/${f}" ]] || die "missing image/${f}"
 done
 [[ ${image_ref} == */*:* ]] || die "image ref must look like registry/owner/name:tag"
+if [[ -n "${payload}" ]]; then
+    [[ -s "${payload}/SHA256SUMS" ]] || die "${payload}: no SHA256SUMS (llm/payload.sh)"
+    grep -cE '^[0-9a-f]{64}  llm-server\.oci\.tar$' "${payload}/SHA256SUMS" > /dev/null ||
+        die "${payload}/SHA256SUMS doesn't list llm-server.oci.tar"
+    [[ $(grep -cE '^[0-9a-f]{64}  [A-Za-z0-9._+-]+\.gguf$' "${payload}/SHA256SUMS") == 1 ]] ||
+        die "${payload}/SHA256SUMS must list exactly one .gguf"
+    echo "build-iso: checking the payload's sha256s"
+    (cd "${payload}" && sha256sum --quiet -c SHA256SUMS) || die "${payload}: sha256 mismatch"
+fi
 
 mkdir -p "${out}"
 out=$(cd "${out}" && pwd)
@@ -81,6 +101,7 @@ print(json.dumps({
         file("/var/lib/scroll-secure/uki/install.sh", read("uki/install.sh"), 0o755),
         file("/var/lib/scroll-secure/uki/keys/db/db.der", read("uki/keys/db/db.der")),
         file("/var/lib/scroll-secure/cosign.pub", read("cosign.pub")),
+        file("/var/lib/scroll-secure/install-payload.sh", read("iso/install-payload.sh"), 0o755),
         file("/usr/local/bin/scroll-secure-install", wrapper, 0o755),
         file("/etc/motd.d/50-scroll-secure.motd", motd),
         # FCOS turns off its live autologin when an Ignition config is
@@ -99,8 +120,28 @@ podman run --rm -v "${work}:/data:Z" -v "${out}:/out:Z" -w /data "${installer}" 
 
 cd "${out}"
 chmod 0644 "${iso}"
+if [[ -n "${payload}" ]]; then
+    # The ISO's MBR has the iso9660 (1, from sector 0) and the ESP (2, inside it).
+    # The payload becomes partition 3, after the ISO on a 1 MiB boundary.
+    img="${iso%.iso}-payload.img"
+    names=$(sed -E 's/^[0-9a-f]{64}  //' "${payload}/SHA256SUMS")
+    mkdir "${work}/payload"
+    for n in ${names} SHA256SUMS; do
+        ln "${payload}/${n}" "${work}/payload/" 2> /dev/null || cp "${payload}/${n}" "${work}/payload/"
+    done
+    bytes=$(du -cbL "${work}/payload" | tail -1 | cut -f1)
+    size=$(( (bytes * 102 / 100 + (256 << 20)) >> 20 ))   # MiB: ext4 overhead and room
+    start=$(( ($(stat -c %s "${iso}") + (1 << 20) - 1) >> 20 ))
+    rm -f "${img}" "${img}.sha256"
+    cp "${iso}" "${img}"
+    truncate -s "$(( (start + size) << 20 ))" "${img}"
+    mkfs.ext4 -q -F -L SCROLL-PAYLOAD -E offset=$((start << 20)) -d "${work}/payload" "${img}" "${size}M"
+    echo "start=$((start << 11)), size=$((size << 11)), type=83" | sfdisk -q --append --no-reread --no-tell-kernel "${img}"
+    rm -f "${iso}" "${iso}.sha256"
+    iso=${img}
+fi
 {
-    echo "# ${iso}: $(stat -c %s "${iso}") bytes, Fedora CoreOS ${fcos_version}, installs ${image_ref}"
+    echo "# ${iso}: $(stat -c %s "${iso}") bytes, Fedora CoreOS ${fcos_version}, installs ${image_ref}${payload:+, llm payload (local only)}"
     sha256sum "${iso}"
 } > "${iso}.sha256"
 cat "${iso}.sha256"

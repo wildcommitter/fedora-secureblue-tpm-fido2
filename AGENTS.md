@@ -136,7 +136,8 @@ vmswitch/test/vmtui-e2e.sh                             # the TUI in a pty agains
 image/repro-lint-test.sh                               # repro-lint catches each broken premise (mutations)
 llm/build.sh                                           # llm-server image -> llm/out/llm-server.oci.tar (reproducible)
 llm/test/llm-e2e.sh                                    # llmctl over vsock loopback + the real server on this GPU (no root)
-test/bootc/llm-vm-e2e.py --work <w>                    # llm import, units, endpoint, llmctl, reboot on the sealed image (CPU)
+test/bootc/llm-vm-e2e.py --work <w>                    # llm payload staging + first boot, units, endpoint, llmctl, reboot on the sealed image (CPU)
+test/bootc/installer-payload-e2e.py --work <w> --img <payload.img>   # build-iso.sh --payload image as a USB stick: staging into a target /var
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
@@ -206,6 +207,10 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
   `container_runtime_domain`. Rootless podman and `--userns=auto` fail. `llm.service` runs
   rootful podman with the host's user namespace and `--user llm` instead; don't
   "fix" it with `ujust set-container-userns on` (weakens every container).
+- **FCOS live USB:** the live system claims the whole USB disk (the ISO is found on it,
+  not on partition 1), so another partition on the stick can't be mounted ("Can't open
+  blockdev"). Mount it through a read-only loop device over the disk at the partition's
+  offset (`install-payload.sh`).
 - **`FROM oci:out`** in the same build as the chunkah stage that writes `./out` races:
   buildah can resolve it first. It lives in `uki/Containerfile.chunked`, its own build.
 

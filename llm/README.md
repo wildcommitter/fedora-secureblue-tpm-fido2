@@ -1,15 +1,17 @@
 # llm: a local model server on the host GPU, for the guests
 
-**Status: steps 1–3 of the [plan](#plan) are built and tested**: the server image (from
-source, reproducible), the host side (units, `llm` CLI, the endpoint, `llmctl`) and
-vmswitch's `llm` network. The host side ran on the sealed image under KVM, on the CPU
-(the lab VMs have no GPU); the GPU ran on this workstation's current OS. Not done: the
-installer payload (step 4) and a GPU run on the sealed image (step 5). See
+**Status: steps 1–4 of the [plan](#plan) are built and tested**: the server image (from
+source, reproducible), the host side (units, `llm` CLI, the endpoint, `llmctl`),
+vmswitch's `llm` network and the installer payload. The host side ran on the sealed image
+under KVM, on the CPU (the lab VMs have no GPU); the GPU ran on this workstation's current
+OS. Not done: a GPU run on the sealed image (step 5). See
 [What was verified](#what-was-verified).
 
 ```sh
 llm/build.sh [tag]                      # -> llm/out/llm-server.oci.tar (reproducible)
-llm import DIR                          # on the host: SHA256SUMS, llm-server.oci.tar, one .gguf
+llm/payload.sh /srv/models/RVN-Q6_K-multilingual-mtp.gguf    # -> llm/out/payload
+image/iso/build-iso.sh --payload llm/out/payload <image ref> out/   # USB image, dd it (local only)
+llm import DIR                          # or by hand on the host: SHA256SUMS, llm-server.oci.tar, one .gguf
 vmswitch plug <guest> <nic> llm         # the guest gets 10.89.N.2/30; API at http://10.89.255.1:8080/v1
 llm key show                            # the key guests send
 llm allow <cid>                         # llmctl for that guest
@@ -56,12 +58,12 @@ The image built from source (`llm/build.sh`, llama.cpp `b12634` = `42f6a58f`, Vu
 | Not built | The web UI (upstream fetches a prebuilt copy at configure time) and HTTPS client support. Guests use the API |
 
 The host side on the sealed image (`test/bootc/llm-vm-e2e.py`, dev keys, SELinux
-enforcing, the 1.5B model on the CPU with `DEVICE=none`): **35/35**.
+enforcing, the 1.5B model on the CPU with `DEVICE=none`): **38/38**.
 
 | Area | Checked |
 |---|---|
 | Before import | sysusers `llm`, tmpfiles modes, every unit off |
-| `llm import` | From an ext4 payload labelled `SCROLL-PAYLOAD`: sha256s, `podman load` (narrow policy file, see below), model 0640 root:llm, selected, key created, units on |
+| The installer's path | `install-payload.sh` stages an ext4 payload labelled `SCROLL-PAYLOAD` into `/var/lib/llm/payload`; after a reboot `llm-firstboot.service` imports it (sha256s, `podman load` with a narrow policy file, see below, model moved, 0640 root:llm, selected, key created, units on) and removes it. Then `llm import` by hand from the same filesystem again |
 | The server process | uid `llm`, `CapEff`/`CapBnd` 0, `NoNewPrivs` 1, uid_map `0 0 4294967295` (no user namespace), a network namespace with only `lo`, `container_t`, read-only root |
 | The endpoint | vmswitch `llm` NIC: a SYN from the guest side of the TAP gets a SYN-ACK; the NIC's host end and other ports don't answer. `/health`, no or wrong key 401, right key 200, `/slots` off, a completion. The proxy is a dynamic user in `systemd_socket_proxyd_t` |
 | `llmctl` (vsock loopback) | `status`, `use` (checked, restarted, back up), a path refused, a CID not allowed gets nothing |
@@ -86,7 +88,7 @@ on the GPU (VRAM grows by the model's size).
 - the GPU on the sealed image (step 5): the SELinux boolean for `/dev/dri` in `container_t`, the `render` group
 - ROCm
 - a real guest OS using the endpoint and `llmctl` over a real vsock device (the e2e plays the guest with `tapprobe.py` and vsock loopback)
-- the installer payload (step 4)
+- a whole `install.sh` run from the USB image (registry pull, cosign, LUKS, then the first boot): its two payload halves are tested apart, see [The installer](#the-installer-baked-into-the-iso)
 
 ## Which model
 
@@ -158,6 +160,9 @@ socket comes from systemd, and the proxy can open nothing but the server's socke
 | `llm/host/usr/lib/systemd/system/llmctl.service` | `llmctl-host` on vsock port 21000, one child process per connection |
 | `llm/host/usr/libexec/llm/llmctl-host` | One llmctl request: CID check, fixed verbs |
 | `llm/host/usr/bin/llm` | The host CLI (root) |
+| `llm/host/usr/lib/systemd/system/llm-firstboot.service` | `llm import --consume /var/lib/llm/payload` once, if the installer staged a payload |
+| `llm/payload.sh` | Assembles a payload directory: the archive, one model, `SHA256SUMS` |
+| `image/iso/install-payload.sh` | In the installer: copies a `SCROLL-PAYLOAD` partition's files into the new `/var` |
 | `llm/host/usr/lib/sysusers.d/llm.conf`, `tmpfiles.d/llm.conf` | User `llm`; `/var/lib/llm{,/models}` root:llm 0750; `/run/llm` llm:llm 0750 |
 | `vmgui/guest/linux/common/usr/bin/llmctl` | Guest client, Linux (in the `vmgui-guest` rpm/deb) |
 | `vmgui/guest/agent/cmd/llmctl` | Guest client, Windows and macOS (in the agent zip/tarball) |
@@ -168,6 +173,7 @@ socket comes from systemd, and the proxy can open nothing but the server's socke
 |---|---|
 | `llm status` | Units, model, image, key, allowed CIDs |
 | `llm import DIR` | A payload directory: `SHA256SUMS` listing `llm-server.oci.tar` and one `.gguf`. Checks every sha256, `podman load`s the image, copies the model to `models/<sha256>.gguf` (0640 root:llm, checked again), selects it if none is, creates the API key if there is none, enables and starts `llm.service` and `llm-proxy.socket` |
+| `llm import --consume DIR` | The same, but moves the model (same filesystem) and removes `DIR` afterwards. `llm-firstboot.service` runs it on the installer's payload |
 | `llm use SHA256` | Checks a model already in `models/` against its name, selects it, restarts |
 | `llm key [show\|rotate]` | The key guests send (`Authorization: Bearer …`). Rotate restarts the server |
 | `llm allow CID` / `llm deny CID` | `/etc/llm/clients.conf`; the first `allow` enables `llmctl.service` |
@@ -217,17 +223,30 @@ contains no OS payload. The model can't simply go in:
 - **Publication:** the ISO in Releases is public, and the model's licence is unknown.
 - **Signing:** the image is cosign-verified, and a model inside it would bloat every update.
 
-Proposal: a **local offline installer image**, built only on this machine and never
-published.
+Decided and built: a **local offline installer image**, built only on this machine and
+never published.
 
 | Step | What |
 |---|---|
-| Build | `image/iso/build-iso.sh --payload llm` writes a raw USB image (at least 32 GB): the usual installer, plus a second partition `SCROLL-PAYLOAD` |
-| Payload | `llm-server.oci.tar` (`llm/build.sh`), the model `.gguf`, and `SHA256SUMS` that pins both: the layout `llm import` reads |
-| Install | After `bootc install`, the first boot runs `llm import` on the payload: it checks every sha256, loads the OCI archive into root's podman storage, copies the model into `/var/lib/llm/models` and creates the API key |
-| Without payload | The normal ISO stays as it is. The feature is then off until a payload is added (`llm import <dir>`) |
+| Payload | `llm/payload.sh MODEL.gguf [DIR]`: `llm-server.oci.tar` (`llm/build.sh`), the model, and `SHA256SUMS` pinning both: the layout `llm import` reads |
+| Build | `image/iso/build-iso.sh --payload DIR <image ref> [out]` checks the sha256s, then writes `scroll-secure-installer-<date>-payload.img`: the usual ISO, unchanged, plus an MBR partition 3, ext4 `SCROLL-PAYLOAD`, after it on a 1 MiB boundary. About 24 GB with the 22.5 GB model: a 32 GB stick. `dd` it |
+| Install | `install.sh`, after `bootc install` and the user account, runs `install-payload.sh` on the new `/var`: it copies only the files `SHA256SUMS` lists into `/var/lib/llm/payload` (0700, `var_lib_t`). It refuses if the target lacks the payload plus 8 GiB |
+| First boot | `llm-firstboot.service` runs `llm import --consume`: every sha256 checked, the archive loaded into root's podman storage, the model moved into `models/`, the API key created, the server started, the staged copy removed |
+| Without payload | The normal ISO stays as it is: `install-payload.sh` does nothing, `llm-firstboot.service` is skipped (`ConditionPathExists`). The feature is off until `llm import <dir>` |
 
-Decided: the USB image with a payload partition.
+The live system (Fedora CoreOS) mounts the whole USB disk, because it finds the ISO on the
+disk itself, not on partition 1. That claim keeps partition 3 from being mounted ("Can't
+open blockdev"), so `install-payload.sh` reads it through a read-only loop device over the
+disk at the partition's offset. Found by the KVM e2e.
+
+Tested, in two halves (each under KVM):
+
+| Test | Checked |
+|---|---|
+| `test/bootc/installer-payload-e2e.py` (11/11) | The real `build-iso.sh --payload` image, booted as a USB stick under stock OVMF (a copy gets `console=ttyS0`): the live system finds the partition and has `install-payload.sh`, `install.sh` calls it; a 6 GB target is refused with nothing copied; a 24 GB target gets exactly the listed files, sha256s intact, 0700 root, `var_lib_t`; the image without partition 3 is a no-op |
+| `test/bootc/llm-vm-e2e.py` (38/38) | On the sealed image: staging, reboot, `llm-firstboot.service` imports and removes the payload, then the whole host side (above) |
+
+Not tested: one install from start to end (registry pull, cosign, LUKS, the first boot).
 
 ## Knobs
 
@@ -260,7 +279,8 @@ Decided: the USB image with a payload partition.
    `llmctl` clients.
 3. **Done:** vmswitch: the `llm` network (option A), the firewalld zone, tests in a container netns
    (`vmswitch-e2e.sh`, 28/28) and on the sealed image (`llm-vm-e2e.py`).
-4. Installer payload: `build-iso.sh --payload`, then a KVM e2e: install from the USB image, boot, check that a
-   guest on `llm` gets an answer and a guest on `uplink` doesn't.
+4. **Done:** installer payload: `llm/payload.sh`, `build-iso.sh --payload`, `install-payload.sh`,
+   `llm-firstboot.service`; `installer-payload-e2e.py` (11/11) and the first-boot path in
+   `llm-vm-e2e.py` (38/38). A whole install from the USB image isn't run end to end.
 5. A GPU smoke on the sealed image on this machine. That's the only real-hardware step: the
    lab VMs have no R9700.

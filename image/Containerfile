@@ -210,6 +210,7 @@ RUN --network=${RUN_NETWORK} for f in /usr/bin/llm /usr/libexec/llm/llmctl-host;
  && bash -n /usr/libexec/llm/llm-run \
  && test -x /usr/lib/systemd/systemd-socket-proxyd \
  && ! test -e /etc/llm \
+ && systemctl enable llm-firstboot.service \
  && semodule -i /usr/share/selinux/packages/llm/llm.cil \
  && semodule -l | grep -qx llm
 

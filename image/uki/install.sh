@@ -282,6 +282,12 @@ chcon "unconfined_u:object_r:user_home_dir_t:s0" "${var_dir}/home/${username}"
 chcon -R "unconfined_u:object_r:config_home_t:s0" "${var_dir}/home/${username}/.config" || true
 chcon -R "unconfined_u:object_r:virt_home_t:s0" "${var_dir}/home/${username}/.config/libvirt" || true
 
+# scroll-secure: the llm payload (llm/README.md), if this installer USB has one:
+# copied into the new /var, imported on first boot.
+if [[ -x /var/lib/scroll-secure/install-payload.sh ]]; then
+    /var/lib/scroll-secure/install-payload.sh "${var_dir}"
+fi
+
 # Optionally install shim.
 clear
 cat << 'EOF'

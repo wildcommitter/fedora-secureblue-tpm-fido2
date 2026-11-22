@@ -1,0 +1,15 @@
+# The installer's llm payload (image/iso/install-payload.sh copied it into
+# /var/lib/llm/payload): checked, imported and removed once, then llm.service runs.
+[Unit]
+Description=Import the installer's llm payload
+ConditionPathExists=/var/lib/llm/payload/SHA256SUMS
+After=systemd-sysusers.service systemd-tmpfiles-setup.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/llm import --consume /var/lib/llm/payload
+TimeoutStartSec=1800
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
