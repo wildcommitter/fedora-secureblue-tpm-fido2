@@ -11,7 +11,8 @@
 # Checks: the security context is up and the waypipe client runs with
 # no_new_privs; an ordinary client can't commit the scroll-vm engine but can
 # commit another; a guest app sees no privileged globals; its window gets the
-# VM's border color; a connection from a CID other than the VM's is refused;
+# VM's border color; an X11 app through xwayland-satellite (the xorg variant)
+# shows up too; a connection from a CID other than the VM's is refused;
 # when the guest goes away its window does too.
 #
 # The repo's vmgui/host files are bind-mounted over the image's, so this tests
@@ -51,7 +52,7 @@ mkdir -p "$W"
 chmod 0777 "$W"
 cleanup() {
     set +e
-    podman rm -f "$CT" > /dev/null 2>&1
+    [[ -n ${KEEP:-} ]] || podman rm -f "$CT" > /dev/null 2>&1   # KEEP=1: leave it for debugging
     rm -rf "$empty"
 }
 trap cleanup EXIT
@@ -195,6 +196,22 @@ fi
 green=$(count_color green 00ff00)
 ((green == 0)) && ok "no other VM's color on it" || bad "other VM's color present ($green px)"
 
+# 3b. the xorg variant (vmgui-guest-xorg): xwayland-satellite on the vmgui display
+# as :7, an X11-only app (xterm, white background) through it
+white0=$(count_color x11-before ffffff)
+podman exec -d "$CT" runuser -u guest -- env "${GENV[@]}" sh -c \
+    'exec xwayland-satellite :7 >> /vgtest/work/satellite.log 2>&1'
+sleep 2
+podman exec -d "$CT" runuser -u guest -- env DISPLAY=:7 xterm -bg white -fg black -title x11win -e sleep 60
+sleep 4
+white=$(count_color x11 ffffff)
+if ((white > white0 + 50000)); then
+    ok "X11 app through xwayland-satellite on the vmgui display ($((white - white0)) px of xterm)"
+else
+    bad "X11 app: white before=$white0 after=$white"
+    cat "$W/satellite.log" "$W/guest.log"
+fi
+
 # 4. a connection from a CID other than the VM's is refused
 guest_server "$OTHER_PORT" wayland-intruder foot --title intruder sleep 30
 if wait_for "$W/host-other.log" 'refused vsock connection from CID 1' 10; then
@@ -208,7 +225,8 @@ green=$(count_color intruder 00ff00)
 ((green == 0)) && ok "no window from the wrong CID" || bad "wrong-CID window drawn ($green px)"
 
 # 5. the guest goes away: so does its window
-ct pkill -u guest -f 'waypipe --vsock' || true
+# By name: waypipe re-execs each connection as `waypipe ... server-conn`.
+ct pkill -u guest -x waypipe || true
 ct pkill -u guest -x foot || true
 sleep 3
 gone=$(count_color gone ff00ff)

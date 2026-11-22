@@ -13,6 +13,10 @@ scroll starts this as a privileged client (WAYLAND_SOCKET). It
      run dir, no TCP).
   3. accepts the guest's waypipe server on vsock port 20000+CID and splices it
      to waypipe, but only from the VM's CID (/etc/vmgui/<vm>.conf, root-owned).
+
+A VM with PROTO=wire in its conf (Windows, macOS: no Wayland in the guest) gets
+vmgui-wire instead of waypipe client, under the same confinement and on the
+same security context; see PROTOCOL.md.
      The CID of a vsock peer is set by the host kernel; a guest can't forge it.
 
 Every window of the VM is a client of that security context: scroll's
@@ -35,6 +39,7 @@ PORT_BASE = 20000
 # nothing here comes from it except XDG_RUNTIME_DIR.
 CONF_DIR = "/etc/vmgui"
 WAYPIPE = ["/usr/bin/waypipe", "--no-gpu", "-c", "none"]
+WIRE = ["/usr/bin/python3", "-I", "/usr/libexec/vmgui/vmgui-wire"]
 
 
 def die(msg):
@@ -62,7 +67,10 @@ def read_conf(vm):
     # `vmgui add` writes 3..1000000; 1 (vsock loopback) is left for the e2e.
     if not re.fullmatch(r"[0-9]{1,7}", cid) or not 1 <= int(cid) <= 1000000 or int(cid) == 2:
         die(f"{path}: bad CID {cid!r}")
-    return int(cid)
+    proto = conf.get("PROTO", "waypipe")
+    if proto not in ("waypipe", "wire"):
+        die(f"{path}: bad PROTO {proto!r}")
+    return int(cid), proto
 
 
 # --- minimal Wayland client: just enough for wp_security_context_v1 -----------
@@ -190,7 +198,7 @@ def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", sys.argv[1]):
         die("usage: vmgui-host <vm>")
     vm = sys.argv[1]
-    cid = read_conf(vm)
+    cid, proto = read_conf(vm)
     port = PORT_BASE + cid
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or die("XDG_RUNTIME_DIR is not set")
@@ -221,7 +229,10 @@ def main():
 
     env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_SOCKET", "DISPLAY")}
     env["WAYLAND_DISPLAY"] = wl_path
-    cmd = landlock(rundir) + WAYPIPE + ["-s", wp_path, "client"]
+    if proto == "wire":
+        cmd = landlock(rundir) + WIRE + ["-s", wp_path]
+    else:
+        cmd = landlock(rundir) + WAYPIPE + ["-s", wp_path, "client"]
     state = {"child": None, "stop": False}
 
     def supervise():
@@ -233,7 +244,7 @@ def main():
             if state["stop"]:
                 return
             backoff = 1 if time.monotonic() - started > 30 else min(backoff * 2, 30)
-            log(f"{vm}: waypipe exited ({rc}), restarting in {backoff}s")
+            log(f"{vm}: {proto} client exited ({rc}), restarting in {backoff}s")
             time.sleep(backoff)
 
     def stop(*_):

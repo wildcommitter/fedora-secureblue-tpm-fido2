@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+[ "$1" = configure ] && systemctl --global enable vmgui-guest.service >/dev/null 2>&1 || true
+#DEBHELPER#

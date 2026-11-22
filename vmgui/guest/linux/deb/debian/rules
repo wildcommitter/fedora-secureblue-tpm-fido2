@@ -1,0 +1,8 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_install:
+	cd common && find usr -type f | while read f; do install -D -m $$(stat -c %a "$$f") "$$f" ../debian/vmgui-guest/"$$f"; done
+	cd wlroots && find usr -type f | while read f; do install -D -m 0644 "$$f" ../debian/vmgui-guest-wlroots/"$$f"; done
+	cd xorg && find usr -type f | while read f; do install -D -m 0644 "$$f" ../debian/vmgui-guest-xorg/"$$f"; done

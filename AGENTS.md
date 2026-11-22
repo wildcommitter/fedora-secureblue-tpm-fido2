@@ -31,7 +31,7 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `image/Containerfile`, `image/build.sh`, `image/files/`, `image/uki/` | Image build, signing pipeline (vendored from secureblue, see `uki/VENDORED`), install, Secure Boot keys (`uki/secure-boot-keys.sh`) |
 | `image/files-luks/`, `image/LUKS.md` | tokenvault: dracut module + generator (initrd), `tokenvault` CLI, SELinux CIL (`tokenvault_conf_t`), tmpfiles |
 | `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in |
-| `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`), `guest/` (addon for the VMs), `test/` |
+| `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`, or to `vmgui-wire` for `PROTO=wire` guests), `guest/` (the topology: `linux/` rpm+deb × wlroots/xorg, `agent/` Go vmgui-agent for win11/macos, `build.sh`), `PROTOCOL.md` (wire protocol), `test/` |
 | `vmswitch/` | Guests' network switch: TAPs + one nftables table (`netdev`: dup to peers; `inet`: routed `uplink`), USB to guests (usbguard + libvirt hostdev), `vmtui` (curses tree table), `usbguard-firstboot` |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
 | `test/bootc/` | tokenvault e2e, Secure Boot enrollment e2e and the duress reset e2e on the sealed image |
@@ -127,6 +127,8 @@ lockscreen/test/duress-e2e.sh                          # duress canary, duresste
 test/bootc/duress-vm-e2e.py --work <w>                 # the real duress hard reset, inside a VM
 test/bootc/vmswitch-vm-e2e.py --work <w>               # vmswitch, usbguard, guests (nested KVM) on the sealed image
 vmgui/test/vmgui-e2e.sh                                # VM windows: headless scroll + vsock loopback (container)
+vmgui/test/vmgui-wire-e2e.sh                           # win11/macos path: vmgui-wire + the real agent (demo backend)
+vmgui/guest/build.sh                                   # guest packages for every target; go vet x6 + go test
 vmswitch/test/vmswitch-e2e.sh                          # switch + uplink: TAPs and nft in a container netns
 vmswitch/test/vmswitch-usb-e2e.sh                      # USB attach logic, stub usbguard/virsh
 vmswitch/test/vmtui-e2e.sh                             # the TUI in a pty against the real switch

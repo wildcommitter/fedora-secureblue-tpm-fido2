@@ -1,0 +1,17 @@
+[Unit]
+Description=vmgui: show this VM's X11 apps on the host (xwayland-satellite on the vmgui display)
+Documentation=file:///usr/share/doc/vmgui/README.md
+ConditionVirtualization=vm
+BindsTo=vmgui-guest.service
+After=vmgui-guest.service
+
+[Service]
+Environment=WAYLAND_DISPLAY=wayland-vmgui
+# waypipe server creates the display socket after it starts.
+ExecStartPre=/bin/sh -c 'for i in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/wayland-vmgui" ] && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/xwayland-satellite :7
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=vmgui-guest.service

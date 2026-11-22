@@ -1,0 +1,481 @@
+#!/usr/bin/python3 -I
+"""vmgui-wire: draw a non-Wayland guest's windows (vmgui PROTOCOL.md, version 1).
+
+    vmgui-wire -s <socket>      (started by vmgui-host for PROTO=wire VMs, confined)
+
+Listens on <socket>, where vmgui-host splices the guest agent's vsock stream
+(CID already checked). Each connection gets its own Wayland connection to
+$WAYLAND_DISPLAY, the VM's scroll-vm security context, so the windows carry the
+VM's frame and get no privileged protocols. Each guest window is an xdg toplevel
+drawn from shm buffers; pointer and keyboard events go back as evdev codes.
+
+This is the trust boundary for these guests: every length, size and rectangle
+from the guest is checked, and anything unexpected closes the connection, which
+takes all its windows with it.
+"""
+import mmap
+import os
+import socket
+import struct
+import sys
+import threading
+
+MAGIC, VERSION = 0x57474D56, 1
+HDR = struct.Struct("<HHII")
+MAX_PAYLOAD = (16 << 20) + 16
+MAX_SIDE = 4096
+MAX_WINDOWS = 64
+MAX_PIXEL_BYTES = 256 << 20
+MAX_TITLE = 512
+
+G_HELLO, G_CREATE, G_DESTROY, G_TITLE, G_RESIZE, G_DAMAGE, G_COMMIT = range(1, 8)
+H_CONFIGURE, H_CLOSE, H_FOCUS, H_MOTION, H_BUTTON, H_AXIS, H_KEY, H_LEAVE = range(0x81, 0x89)
+
+WL_SHM_FORMAT_XRGB8888 = 1
+
+
+def log(msg):
+    print(f"vmgui-wire: {msg}", file=sys.stderr, flush=True)
+
+
+class Violation(Exception):
+    pass
+
+
+def wl_str(s):
+    b = s.encode() + b"\0"
+    return struct.pack("=I", len(b)) + b + b"\0" * (-len(b) % 4)
+
+
+def clean_title(raw):
+    s = raw.decode("utf-8", errors="replace")
+    return "".join(c for c in s if c.isprintable())[:256]
+
+
+# --- Wayland client (wire protocol, stdlib) -------------------------------------
+
+class Wayland:
+    """One connection; requests from any thread, events on the reader thread."""
+
+    def __init__(self, path):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(path)
+        self.lock = threading.Lock()
+        self.next_id = 2
+        self.handlers = {}         # object id -> callable(opcode, body, fds)
+        self.buf = b""
+        self.fds = []
+
+    def new_id(self, handler=None):
+        with self.lock:
+            oid = self.next_id
+            self.next_id += 1
+        if handler:
+            self.handlers[oid] = handler
+        return oid
+
+    def send(self, obj, opcode, payload=b"", fds=()):
+        msg = struct.pack("=II", obj, ((8 + len(payload)) << 16) | opcode) + payload
+        with self.lock:
+            if fds:
+                socket.send_fds(self.sock, [msg], list(fds))
+            else:
+                self.sock.sendall(msg)
+
+    def dispatch_forever(self):
+        while True:
+            data, fds, _, _ = socket.recv_fds(self.sock, 65536, 8)
+            if not data:
+                raise OSError("compositor closed the connection")
+            self.buf += data
+            self.fds += fds
+            while len(self.buf) >= 8:
+                obj, word = struct.unpack_from("=II", self.buf)
+                size = word >> 16
+                if size < 8 or len(self.buf) < size:
+                    break
+                body, self.buf = self.buf[8:size], self.buf[size:]
+                h = self.handlers.get(obj)
+                if h:
+                    h(word & 0xFFFF, body)
+                elif obj == 1 and word & 0xFFFF == 0:
+                    _, code, n = struct.unpack_from("=III", body)
+                    raise OSError(f"compositor error {code}: {body[12:12 + n - 1].decode(errors='replace')}")
+            for fd in self.fds:      # wl_keyboard.keymap: we send evdev codes, not keysyms
+                os.close(fd)
+            self.fds = []
+
+
+# --- one guest connection -------------------------------------------------------
+
+class Window:
+    def __init__(self, sess, wid, w, h):
+        self.sess, self.wid = sess, wid
+        self.w = self.h = 0
+        self.fb = None
+        self.pool = self.mem = None
+        self.buffers = []          # [buffer id, busy]
+        self.configured = False
+        self.pending = False       # a commit waits for a configure or a free buffer
+        self.dirty = []            # damage rects since the last present
+        wl = sess.wl
+        self.surface = wl.new_id(lambda op, b: None)
+        wl.send(sess.compositor, 0, struct.pack("=I", self.surface))
+        self.xdg_surface = wl.new_id(self.on_xdg_surface)
+        wl.send(sess.wm_base, 2, struct.pack("=II", self.xdg_surface, self.surface))
+        self.toplevel = wl.new_id(self.on_toplevel)
+        wl.send(self.xdg_surface, 1, struct.pack("=I", self.toplevel))
+        wl.send(self.toplevel, 3, wl_str("vmgui-wire"))
+        self.resize(w, h)
+        wl.send(self.surface, 6)   # initial commit, no buffer: asks for a configure
+
+    def pixel_bytes(self):
+        return self.w * self.h * 4 * 3        # local frame + two shm buffers
+
+    def resize(self, w, h):
+        self.free_buffers()
+        self.w, self.h = w, h
+        self.fb = bytearray(w * h * 4)
+        size = w * h * 4 * 2
+        fd = os.memfd_create("vmgui-wire", os.MFD_CLOEXEC)
+        os.ftruncate(fd, size)
+        self.mem = mmap.mmap(fd, size)
+        wl = self.sess.wl
+        self.pool = wl.new_id()
+        wl.send(self.sess.shm, 0, struct.pack("=Ii", self.pool, size), fds=(fd,))
+        os.close(fd)
+        self.buffers = []
+        for i in range(2):
+            bid = wl.new_id()
+            idx = len(self.buffers)
+            wl.handlers[bid] = lambda op, b, idx=idx: self.on_release(idx)
+            wl.send(self.pool, 0, struct.pack("=IiiiiI", bid, i * w * h * 4, w, h, w * 4,
+                                              WL_SHM_FORMAT_XRGB8888))
+            self.buffers.append([bid, False])
+        self.dirty = [(0, 0, w, h)]
+
+    def free_buffers(self):
+        wl = self.sess.wl
+        for bid, _ in self.buffers:
+            wl.send(bid, 0)
+            wl.handlers.pop(bid, None)
+        self.buffers = []
+        if self.pool:
+            wl.send(self.pool, 1)
+            self.pool = None
+        if self.mem:
+            self.mem.close()
+            self.mem = None
+
+    def destroy(self):
+        wl = self.sess.wl
+        self.free_buffers()
+        for obj in (self.toplevel, self.xdg_surface, self.surface):
+            wl.send(obj, 0)
+            wl.handlers.pop(obj, None)
+
+    def damage(self, x, y, w, h, pixels):
+        stride, row = self.w * 4, w * 4
+        for r in range(h):
+            o = (y + r) * stride + x * 4
+            self.fb[o:o + row] = pixels[r * row:(r + 1) * row]
+        self.dirty.append((x, y, w, h))
+
+    def present(self):
+        if not self.configured:
+            self.pending = True
+            return
+        free = [i for i, (_, busy) in enumerate(self.buffers) if not busy]
+        if not free:
+            self.pending = True
+            return
+        i = free[0]
+        n = self.w * self.h * 4
+        self.mem[i * n:(i + 1) * n] = self.fb
+        bid = self.buffers[i][0]
+        self.buffers[i][1] = True
+        wl = self.sess.wl
+        wl.send(self.surface, 1, struct.pack("=Iii", bid, 0, 0))
+        for x, y, w, h in self.dirty:
+            wl.send(self.surface, 9, struct.pack("=iiii", x, y, w, h))
+        self.dirty = []
+        self.pending = False
+        wl.send(self.surface, 6)
+
+    # Wayland events (reader thread; the guest loop holds sess.lock for state)
+    def on_xdg_surface(self, op, body):
+        if op == 0:
+            serial, = struct.unpack("=I", body)
+            with self.sess.lock:
+                self.sess.wl.send(self.xdg_surface, 4, struct.pack("=I", serial))
+                self.configured = True
+                if self.pending or self.dirty:
+                    self.present()
+
+    def on_toplevel(self, op, body):
+        if op == 0:
+            w, h = struct.unpack_from("=ii", body)
+            if w > 0 and h > 0 and (w, h) != (self.w, self.h):
+                self.sess.to_guest(H_CONFIGURE, self.wid, struct.pack("<II", min(w, MAX_SIDE), min(h, MAX_SIDE)))
+        elif op == 1:
+            self.sess.to_guest(H_CLOSE, self.wid)
+
+    def on_release(self, idx):
+        with self.sess.lock:
+            if idx < len(self.buffers):
+                self.buffers[idx][1] = False
+                if self.pending:
+                    self.present()
+
+
+class Session:
+    def __init__(self, conn, display):
+        self.conn = conn
+        self.wlock = threading.Lock()
+        self.lock = threading.Lock()
+        self.windows = {}
+        self.by_surface = {}
+        self.pointer_win = self.key_win = None
+        self.wl = Wayland(display)
+        self.setup()
+
+    def to_guest(self, typ, wid, payload=b""):
+        try:
+            with self.wlock:
+                self.conn.sendall(HDR.pack(typ, 0, wid, len(payload)) + payload)
+        except OSError:
+            pass
+
+    def setup(self):
+        wl, found, done = self.wl, {}, threading.Event()
+
+        def on_registry(op, body):
+            if op == 0:
+                name, n = struct.unpack_from("=II", body)
+                iface = body[8:8 + n - 1].decode()
+                ver, = struct.unpack_from("=I", body, 8 + n + (-n % 4))
+                found[iface] = (name, ver)
+
+        registry = wl.new_id(on_registry)
+        wl.send(1, 1, struct.pack("=I", registry))
+        cb = wl.new_id(lambda op, b: done.set())
+        wl.send(1, 0, struct.pack("=I", cb))
+        threading.Thread(target=self.wayland_loop, daemon=True).start()
+        if not done.wait(10):
+            raise OSError("no registry roundtrip from the compositor")
+
+        def bind(iface, ver, handler=None):
+            if iface not in found:
+                raise OSError(f"compositor has no {iface}")
+            name, have = found[iface]
+            oid = wl.new_id(handler)
+            wl.send(registry, 0, struct.pack("=I", name) + wl_str(iface) + struct.pack("=II", min(ver, have), oid))
+            return oid
+
+        self.compositor = bind("wl_compositor", 4)
+        self.shm = bind("wl_shm", 1)
+        self.wm_base = bind("xdg_wm_base", 2, self.on_wm_base)
+        if "wl_seat" in found:
+            self.seat = bind("wl_seat", 5, self.on_seat)
+
+    def wayland_loop(self):
+        try:
+            self.wl.dispatch_forever()
+        except OSError as e:
+            log(str(e))
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def on_wm_base(self, op, body):
+        if op == 0:
+            self.wl.send(self.wm_base, 3, body[:4])        # pong
+
+    def on_seat(self, op, body):
+        """Follow the seat's capabilities: when the last pointer or keyboard goes
+        (unplugged), wlroots makes our object inert, so release it and get a new
+        one when the capability comes back."""
+        if op != 0:
+            return
+        caps, = struct.unpack("=I", body)
+        for bit, attr, get_op, release_op, handler in ((1, "pointer", 0, 1, self.on_pointer),
+                                                       (2, "keyboard", 1, 0, self.on_keyboard)):
+            obj = getattr(self, attr, None)
+            if caps & bit and not obj:
+                obj = self.wl.new_id(handler)
+                self.wl.send(self.seat, get_op, struct.pack("=I", obj))
+                setattr(self, attr, obj)
+            elif not caps & bit and obj:
+                self.wl.send(obj, release_op)       # wl_pointer/wl_keyboard.release (v3+)
+                self.wl.handlers.pop(obj, None)
+                setattr(self, attr, None)
+                if attr == "pointer":
+                    self.pointer_win = None
+                else:
+                    self.key_win = None
+
+    def on_pointer(self, op, body):
+        def xy(off):
+            x, y = struct.unpack_from("=ii", body, off)
+            return struct.pack("<ii", x >> 8, y >> 8)
+        if op == 0:                                    # enter
+            _, surf = struct.unpack_from("=II", body)
+            self.pointer_win = self.by_surface.get(surf)
+            if self.pointer_win is not None:
+                self.to_guest(H_MOTION, self.pointer_win, xy(8))
+        elif self.pointer_win is None:
+            return
+        elif op == 1:                                  # leave
+            self.to_guest(H_LEAVE, self.pointer_win)
+            self.pointer_win = None
+        elif op == 2:                                  # motion
+            self.to_guest(H_MOTION, self.pointer_win, xy(4))
+        elif op == 3:                                  # button
+            _, _, button, state = struct.unpack_from("=IIII", body)
+            self.to_guest(H_BUTTON, self.pointer_win, struct.pack("<II", button, state))
+        elif op == 4:                                  # axis
+            _, axis, value = struct.unpack_from("=IIi", body)
+            self.to_guest(H_AXIS, self.pointer_win, struct.pack("<Ii", axis, value))
+
+    def on_keyboard(self, op, body):
+        if op == 1:                                    # enter
+            _, surf = struct.unpack_from("=II", body)
+            self.key_win = self.by_surface.get(surf)
+            if self.key_win is not None:
+                self.to_guest(H_FOCUS, self.key_win, struct.pack("<I", 1))
+        elif op == 2 and self.key_win is not None:     # leave
+            self.to_guest(H_FOCUS, self.key_win, struct.pack("<I", 0))
+            self.key_win = None
+        elif op == 3 and self.key_win is not None:     # key
+            _, _, key, state = struct.unpack_from("=IIII", body)
+            self.to_guest(H_KEY, self.key_win, struct.pack("<II", key, state))
+
+    # guest stream
+    def recv_exact(self, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.conn.recv(min(n - len(buf), 1 << 20))
+            if not chunk:
+                raise EOFError
+            buf += chunk
+        return bytes(buf)
+
+    def run(self):
+        typ, flags, wid, length = HDR.unpack(self.recv_exact(HDR.size))
+        if (typ, flags, wid, length) != (G_HELLO, 0, 0, 8):
+            raise Violation("first message is not HELLO")
+        magic, ver = struct.unpack("<II", self.recv_exact(8))
+        if magic != MAGIC or ver != VERSION:
+            raise Violation(f"bad HELLO (magic {magic:#x}, version {ver})")
+        while True:
+            typ, flags, wid, length = HDR.unpack(self.recv_exact(HDR.size))
+            if flags or length > MAX_PAYLOAD or wid == 0:
+                raise Violation(f"bad header (type {typ}, flags {flags}, window {wid}, length {length})")
+            body = self.recv_exact(length)
+            with self.lock:
+                self.handle(typ, wid, body)
+
+    @staticmethod
+    def size(body):
+        if len(body) != 8:
+            raise Violation("size payload is not 8 bytes")
+        w, h = struct.unpack("<II", body)
+        if not (1 <= w <= MAX_SIDE and 1 <= h <= MAX_SIDE):
+            raise Violation(f"size {w}x{h} out of range")
+        return w, h
+
+    def budget(self, extra):
+        used = sum(win.pixel_bytes() for win in self.windows.values())
+        if used + extra > MAX_PIXEL_BYTES:
+            raise Violation("pixel memory cap exceeded")
+
+    def handle(self, typ, wid, body):
+        win = self.windows.get(wid)
+        if typ == G_CREATE:
+            if win is not None or len(self.windows) >= MAX_WINDOWS:
+                raise Violation(f"CREATE of window {wid} refused")
+            w, h = self.size(body)
+            self.budget(w * h * 12)
+            win = Window(self, wid, w, h)
+            self.windows[wid] = win
+            self.by_surface[win.surface] = wid
+            return
+        if win is None:
+            raise Violation(f"message {typ} for unknown window {wid}")
+        if typ == G_DESTROY and not body:
+            self.drop(wid)
+        elif typ == G_TITLE and len(body) <= MAX_TITLE:
+            self.wl.send(win.toplevel, 2, wl_str(clean_title(body)))
+        elif typ == G_RESIZE:
+            w, h = self.size(body)
+            self.budget(w * h * 12 - win.pixel_bytes())
+            win.resize(w, h)
+        elif typ == G_DAMAGE and len(body) >= 16:
+            x, y, w, h = struct.unpack_from("<IIII", body)
+            if not (w and h and x + w <= win.w and y + h <= win.h) or len(body) != 16 + w * h * 4:
+                raise Violation(f"DAMAGE {w}x{h}+{x}+{y} outside {win.w}x{win.h} or wrong length")
+            win.damage(x, y, w, h, memoryview(body)[16:])
+        elif typ == G_COMMIT and not body:
+            win.present()
+        else:
+            raise Violation(f"bad message type {typ} (length {len(body)})")
+
+    def drop(self, wid):
+        win = self.windows.pop(wid)
+        self.by_surface.pop(win.surface, None)
+        if self.pointer_win == wid:
+            self.pointer_win = None
+        if self.key_win == wid:
+            self.key_win = None
+        win.destroy()
+
+    def close(self):
+        # shutdown, not just close: the reader thread is blocked in recv on this
+        # socket, and close() alone neither wakes it nor ends the connection.
+        # The compositor drops every window of this connection.
+        for s in (self.wl.sock, self.conn):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            s.close()
+
+
+def serve(conn, display):
+    try:
+        sess = Session(conn, display)
+    except OSError as e:
+        log(f"no Wayland connection: {e}")
+        conn.close()
+        return
+    try:
+        sess.run()
+    except Violation as e:
+        log(f"guest protocol violation, dropping its windows: {e}")
+    except (EOFError, OSError):
+        pass
+    sess.close()
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "-s":
+        sys.exit("usage: vmgui-wire -s <socket>")
+    display = os.environ.get("WAYLAND_DISPLAY", "")
+    if not display.startswith("/"):
+        sys.exit("vmgui-wire: WAYLAND_DISPLAY must be the security context's absolute path")
+    path = sys.argv[2]
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    ls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ls.bind(path)
+    ls.listen(4)
+    while True:
+        conn, _ = ls.accept()
+        threading.Thread(target=serve, args=(conn, display), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

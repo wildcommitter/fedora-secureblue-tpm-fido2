@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vmgui: declare which VMs may show windows in the scroll session (Qubes-style).
 #
-#   run0 vmgui add <vm> <cid> <color>   # e.g. vmgui add work 7 '#cc3333'
+#   run0 vmgui add [--os linux|win11|macos] <vm> <cid> <color>   # e.g. vmgui add work 7 '#cc3333'
 #   run0 vmgui remove <vm>
 #   vmgui list
 #   vmgui xml <vm>                      # the libvirt <vsock> element for the VM
@@ -11,7 +11,8 @@
 # that CID) and /etc/scroll/config.d/60-vmgui-<vm>.conf (starts vmgui-host as a
 # privileged client and colors the VM's windows). Both take effect at the next
 # login. The VM itself needs the vsock device from `vmgui xml` and the guest
-# addon (vmgui/guest).
+# addon (vmgui/guest). --os linux (default) uses waypipe; win11 and macos use the
+# vmgui wire protocol (PROTOCOL.md) and the vmgui-agent in the guest.
 set -euo pipefail
 
 CONF_DIR=/etc/vmgui
@@ -32,6 +33,16 @@ conf_cid() {
 }
 
 cmd_add() {
+    local os=linux proto=waypipe
+    if [[ ${1:-} == --os ]]; then
+        os=${2:-}
+        shift 2 || usage
+    fi
+    case $os in
+        linux) proto=waypipe ;;
+        win11 | macos) proto=wire ;;
+        *) die "--os must be linux, win11 or macos" ;;
+    esac
     [[ $# -eq 3 ]] || usage
     local vm=$1 cid=$2 color=$3 f
     check_vm "$vm"
@@ -43,7 +54,7 @@ cmd_add() {
         [[ $(sed -n 's/^CID=//p' "$f") != "$cid" ]] || die "CID $cid is already used by $(basename "$f" .conf)"
     done
     install -d -m 0755 "$CONF_DIR" "$SCROLL_D"
-    printf 'CID=%s\nCOLOR=%s\n' "$cid" "$color" > "$CONF_DIR/$vm.conf.tmp"
+    printf 'CID=%s\nCOLOR=%s\nOS=%s\nPROTO=%s\n' "$cid" "$color" "$os" "$proto" > "$CONF_DIR/$vm.conf.tmp"
     chmod 0644 "$CONF_DIR/$vm.conf.tmp"
     mv "$CONF_DIR/$vm.conf.tmp" "$CONF_DIR/$vm.conf"
     cat > "$SCROLL_D/60-vmgui-$vm.conf.tmp" <<EOF
@@ -53,7 +64,7 @@ for_window [sandbox_engine="^scroll-vm$" sandbox_app_id="^$vm$"] border_color $c
 EOF
     chmod 0644 "$SCROLL_D/60-vmgui-$vm.conf.tmp"
     mv "$SCROLL_D/60-vmgui-$vm.conf.tmp" "$SCROLL_D/60-vmgui-$vm.conf"
-    echo "VM $vm: CID $cid, vsock port $((PORT_BASE + cid)), color $color. Log in again to apply."
+    echo "VM $vm ($os, $proto): CID $cid, vsock port $((PORT_BASE + cid)), color $color. Log in again to apply."
     echo "Add to the domain (virsh edit $vm), inside <devices>:"
     cmd_xml "$vm"
 }
@@ -71,7 +82,8 @@ cmd_list() {
     for f in "$CONF_DIR"/*.conf; do
         [[ -e $f ]] || continue
         vm=$(basename "$f" .conf)
-        printf '%-20s CID=%-8s %s\n' "$vm" "$(conf_cid "$vm")" "$(sed -n 's/^COLOR=//p' "$f")"
+        printf '%-20s CID=%-8s %-8s %s\n' "$vm" "$(conf_cid "$vm")" "$(sed -n 's/^OS=//p' "$f")" \
+            "$(sed -n 's/^COLOR=//p' "$f")"
     done
 }
 

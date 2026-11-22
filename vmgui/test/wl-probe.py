@@ -4,6 +4,9 @@
     wl-probe.py globals             # print the globals this client sees, one per line
     wl-probe.py secctx <engine>     # try to commit a security context with <engine>;
                                     # prints "committed" or "refused: <message>"
+    wl-probe.py hold-pointer        # plug in one virtual pointer and keep it until
+                                    # killed (needs privileged_clients), so the seat
+                                    # keeps its pointer capability between wlrctl calls
 
 Connects to $WAYLAND_DISPLAY as an ordinary (unprivileged) client.
 """
@@ -73,6 +76,18 @@ def main():
     if sys.argv[1:] == ["globals"]:
         print("\n".join(sorted(wl.globals)))
         return
+    if sys.argv[1:] == ["hold-pointer"]:
+        iface = "zwlr_virtual_pointer_manager_v1"
+        if iface not in wl.globals:
+            sys.exit(f"no {iface}")
+        wl.send(2, 0, struct.pack("=I", wl.globals[iface]) + wl_str(iface) + struct.pack("=II", 1, 4))
+        wl.send(4, 0, struct.pack("=II", 0, 5))   # create_virtual_pointer(seat: default) -> 5
+        err = wl.roundtrip(6)
+        if err:
+            sys.exit(f"refused: {err}")
+        print("holding", flush=True)
+        while True:
+            wl.event()
     if len(sys.argv) != 3 or sys.argv[1] != "secctx":
         sys.exit(__doc__)
     iface = "wp_security_context_manager_v1"

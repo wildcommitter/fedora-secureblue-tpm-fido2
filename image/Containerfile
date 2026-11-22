@@ -178,7 +178,7 @@ RUN --network=${RUN_NETWORK} systemctl enable \
 # runs per VM in the session (exec_privileged, from `vmgui add`); /etc/vmgui is
 # empty until then. The guest half (vmgui/guest) goes into the VMs, not here.
 COPY --from=vmgui host/ /
-RUN --network=${RUN_NETWORK} /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host \
+RUN --network=${RUN_NETWORK} /usr/bin/python3 -I -m py_compile /usr/libexec/vmgui/vmgui-host /usr/libexec/vmgui/vmgui-wire \
  && find /usr/libexec/vmgui -name __pycache__ -exec rm -rf {} + \
  && bash -n /usr/bin/vmgui \
  && /usr/bin/setpriv --help | grep -q landlock-access \

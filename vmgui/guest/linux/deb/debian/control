@@ -1,0 +1,28 @@
+Source: vmgui-guest
+Section: x11
+Priority: optional
+Maintainer: scroll-secure <noreply@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: vmgui-guest
+Architecture: all
+Depends: waypipe, python3, systemd, ${misc:Depends}
+Description: show this VM's windows on the host's scroll session (vmgui)
+ Runs waypipe server on a vmgui display in the user session and forwards each
+ app over vsock to the host, where vmgui-host draws it framed in the VM's color.
+
+Package: vmgui-guest-wlroots
+Architecture: all
+Depends: vmgui-guest (= ${binary:Version}), ${misc:Depends}
+Description: vmgui: native Wayland apps default to the vmgui display
+ environment.d defaults so Wayland apps use the vmgui display.
+
+Package: vmgui-guest-xorg
+Architecture: all
+Depends: vmgui-guest (= ${binary:Version}), xwayland-satellite, ${misc:Depends}
+Description: vmgui: X11 apps through xwayland-satellite
+ xwayland-satellite on the vmgui display as X server :7, so X11 apps show up
+ on the host as ordinary windows. Needs a release that packages
+ xwayland-satellite (Debian 13 and forky don't yet).

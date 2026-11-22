@@ -39,35 +39,101 @@ vmgui list
 vmgui run work firefox            # optional: start an app over ssh on vsock (see below)
 ```
 
-In the guest (Fedora), as root:
+## Guests: the topology
+
+`vmgui/guest/build.sh` builds the guest half for each (packaging, arch, display) tuple
+into `vmgui/guest/out/`:
+
+| Guest | Packaging | Arch | Display | Artifact | Path to the host |
+|---|---|---|---|---|---|
+| Linux | rpm | x86_64, aarch64 | wlroots | `vmgui-guest` + `vmgui-guest-wlroots` (noarch) | waypipe |
+| Linux | rpm | x86_64, aarch64 | xorg | `vmgui-guest` + `vmgui-guest-xorg` (noarch) | xwayland-satellite → waypipe |
+| Linux | deb | x86_64, aarch64 | wlroots | `vmgui-guest` + `vmgui-guest-wlroots` (all) | waypipe |
+| Linux | deb | x86_64, aarch64 | xorg | `vmgui-guest` + `vmgui-guest-xorg` (all) | xwayland-satellite → waypipe |
+| Windows 11 | zip + `install.ps1` | amd64, arm64 | Win32 / DWM | `vmgui-agent-win11-<arch>.zip` | vmgui-agent → wire protocol |
+| macOS | tar.gz + LaunchAgent | amd64, arm64 | Quartz | `vmgui-agent-macos-<arch>.tar.gz` | vmgui-agent → wire protocol |
+
+- **Linux packages are noarch.** They contain a Python launcher, units and environment.d
+  files. waypipe and xwayland-satellite come from the guest distro for its own arch. The
+  install tests ran on x86_64 only, because this host has no aarch64 emulation.
+- **wlroots** means native Wayland apps on the vmgui display. The guest needs no
+  compositor of its own: waypipe is the display.
+- **xorg** runs `xwayland-satellite :7` on that display (`DISPLAY=:7`), so X11-only apps
+  become ordinary host windows. **Debian 13 and forky don't package xwayland-satellite**,
+  so the deb xorg package won't install there yet. Fedora 44 does.
+- **win11 and macos** use `vmgui-agent` (Go, `vmgui/guest/agent`) and the wire protocol in
+  [PROTOCOL.md](PROTOCOL.md). On the host, `vmgui add --os win11|macos` writes `PROTO=wire`,
+  and vmgui-host runs `vmgui-wire` instead of waypipe client: same security context, same
+  confinement, same CID check.
+
+Install in the guest:
 
 ```sh
-./install.sh <user>               # from vmgui/guest: waypipe, unit, environment.d, linger
+dnf install ./vmgui-guest-*.rpm   # or: apt install ./vmgui-guest_*.deb ./vmgui-guest-wlroots_*.deb
+loginctl enable-linger <user>     # so the forwarder runs without a login on the guest
 ```
 
-Then any Wayland app started in the guest user's session shows up on the host. `vmgui run`
-uses systemd's ssh-over-vsock: the guest needs `openssh-server` (systemd-ssh-generator puts
-sshd on vsock in a VM) and your public key in `authorized_keys`. **`vmgui run`, `install.sh`
-and `vmgui-guest` haven't been exercised by the e2e yet** (it has no real guest, see
-below).
+```powershell
+.\install.ps1 -Cid 7             # Windows 11, elevated; needs virtio-win's viosock driver
+```
+
+```sh
+./install.sh 7                    # macOS, as the user; then allow Screen Recording and Accessibility
+```
+
+Then any app in the guest user's session shows up on the host. `vmgui run` uses systemd's
+ssh-over-vsock: the guest needs `openssh-server` (systemd-ssh-generator puts sshd on vsock
+in a VM) and your public key in `authorized_keys`.
+
+**What's tested and what isn't.** The Linux packages are built and installed in Fedora 44
+and Debian 13 containers. The waypipe path and the xorg path (xwayland-satellite) run in
+the e2e. The wire path runs end to end with the real `vmgui-agent` (its Linux demo
+backend) as the guest. The Windows and macOS backends compile and pass `go vet` for amd64
+and arm64, but **they haven't run in a real Windows 11 or macOS guest yet.** That includes
+viosock's address family lookup, PrintWindow under DWM, SendInput, and CoreGraphics through
+purego. `vmgui run` and `vmgui-guest` in a real VM aren't exercised either.
+
+**macOS:** Apple's licence allows macOS VMs only on Apple hardware, so the agent's real
+target is a macOS VM on a Mac (Virtualization.framework, which has virtio-vsock). Under
+QEMU/KVM, macOS has no vsock driver we know of, so the agent can't reach the host there.
+Close and resize from the host aren't implemented on macOS: they need the Accessibility API.
 
 ## Limits
 
 - **No GPU path.** `--no-gpu` on both ends: shm buffers only, with no dmabuf from the guest.
   That's fine for desktop apps, but video and 3D are CPU-rendered in the guest.
-- **No Xwayland.** Wayland apps only, on both sides.
+- **No Xwayland on the host.** X11 apps run only in the guest (the xorg variant), and
+  reach the host as Wayland windows.
+- **Wire keyboard input is raw evdev codes.** The guest maps them to its own codes (set-1
+  scancodes on Windows, kVK on macOS), so set the guest's keyboard layout to match the
+  host's. There's no cursor image on wire windows yet.
 - **Clipboard.** Guest apps use the normal Wayland clipboard with the focused window.
   Qubes' explicit copy between VMs isn't there. A focused guest window can read what you
   copied on the host.
 - **waypipe client parses guest data.** It's the trust boundary, so it's confined, but it's
-  not a minimal GUI daemon like Qubes'.
+  not a minimal GUI daemon like Qubes'. For wire guests, `vmgui-wire` is the boundary: about
+  500 lines of stdlib Python, closer to Qubes' daemon. It checks every length, size and
+  rectangle, and any violation drops that connection and its windows.
 
 ## Test
 
 ```sh
 vmgui/test/vmgui-e2e.sh                               # loads vsock_loopback (sudo) if needed
 SCROLL_RPM_DIR=<dir> vmgui/test/vmgui-e2e.sh          # with a scroll RPM not yet in the image
+vmgui/test/vmgui-wire-e2e.sh                          # the win11/macos path, real agent (demo backend)
+vmgui/guest/build.sh                                  # all guest targets; go vet x6, go test
 ```
+
+`vmgui-wire-e2e.sh` checks:
+
+- vmgui-wire runs confined instead of waypipe
+- the agent's window has the VM's border and the guest's pixels
+- the compositor's configure reaches the guest
+- keyboard and pointer input arrive, including after the seat's pointer is unplugged and
+  replugged
+- a bad HELLO, damage outside the window and an oversized window each drop only that
+  connection
+- the window goes away with the agent
 
 The test runs headless scroll in the image rootfs with vmgui-host started by
 `exec_privileged`. The "guest" is a waypipe server in the same container on vsock loopback
