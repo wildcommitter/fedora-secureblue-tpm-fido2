@@ -15,6 +15,11 @@
 # to the internet leaves wan masqueraded, the LAN and a spoofed source don't leave,
 # unplugging removes the routing table. /proc/sys is read-only in a container, so
 # forwarding starts on here; vmswitch switching it on is for the KVM e2e.
+# llm (listeners on 10.89.255.1:8080 and :22 and on the NIC's host end stand in for the
+# model server and other host services): the host answers ARP; a SYN to the model
+# server gets a SYN-ACK; port 22, the host end, a ping, a spoofed source, another llm
+# guest and the internet get nothing; with uplink at once, both work; unplugging
+# removes llm0 and the table.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -126,6 +131,53 @@ if ! ct nft list table inet vmswitch > /dev/null 2>&1 && [[ -z $(ct ip -4 addr s
     ok "unplug: routing table and host address gone"
 else
     bad "unplug: routing table and host address gone"
+fi
+# ---- llm
+vs plug ga eth0 llm
+vs plug gb eth0 llm
+GA=10.89.0.2 GB=10.89.1.2 LH=10.89.0.1 SVC=10.89.255.1
+[[ $(ct ip -4 -o addr show dev llm0 | awk '{print $4}') == "$SVC/32" ]] && ok "llm: llm0 holds $SVC" || bad "llm: llm0 holds $SVC"
+ct sh -c "nohup python3 -I -c '
+import socket, threading
+def srv(a, p):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((a, p)); s.listen()
+    while True: s.accept()[0].close()
+for a, p in ((\"$SVC\", 8080), (\"$SVC\", 22), (\"$LH\", 8080)):
+    threading.Thread(target=srv, args=(a, p), daemon=True).start()
+threading.Event().wait()' > /dev/null 2>&1 &"
+sleep 0.5
+ct nft add rule netdev labwan out ip saddr 10.89.0.0/16 counter
+llmout() { ct nft list chain netdev labwan out | sed -n "s|.*ip saddr 10.89.0.0/16 counter packets \([0-9]*\).*|\1|p"; }
+HM=$(ct cat "/sys/class/net/$A/address")
+if probe arp "$A" "$MA" "$GA" "$LH" 2 > /dev/null; then ok "llm: host answers ARP"; else bad "llm: host answers ARP"; fi
+if probe tcp "$A" "$MA" "$HM" "$GA" "$SVC" 8080 2 > /dev/null; then ok "llm: SYN-ACK from $SVC:8080"; else bad "llm: SYN-ACK from $SVC:8080"; fi
+probe tcp "$A" "$MA" "$HM" "$GA" "$SVC" 22 2 > /dev/null && bad "llm: $SVC:22 answered" || ok "llm: other ports closed ($SVC:22 listens)"
+probe tcp "$A" "$MA" "$HM" "$GA" "$LH" 8080 2 > /dev/null && bad "llm: host end answered" || ok "llm: the NIC's host end closed"
+probe ping "$A" "$MA" "$HM" "$GA" "$SVC" 1 > /dev/null && bad "llm: ping answered" || ok "llm: no ping reply"
+probe tcp "$A" "$MA" "$HM" 10.89.0.66 "$SVC" 8080 2 > /dev/null && bad "llm: spoofed source answered" || ok "llm: spoofed source dropped"
+MB=$(tap gb/eth0 mac)
+ct sh -c "python3 -I /vstest/tapprobe.py recv $B none 3 > /tmp/recv.llm 2>&1 & sleep 0.5;
+          python3 -I /vstest/tapprobe.py tcp $A $MA $HM $GA $GB 8080 1 > /dev/null; wait" || true
+if ct grep -c '^frame' /tmp/recv.llm > /dev/null; then bad "llm: ga reached gb"; else ok "llm: guests on llm can't reach each other"; fi
+probe tcp "$A" "$MA" "$HM" "$GA" 198.51.100.7 8080 1 > /dev/null || true
+[[ $(llmout) == 0 ]] && ok "llm: nothing leaves for the internet" || bad "llm: $(llmout) packet(s) left wan"
+vs nic add gd eth0
+vs plug gd eth0 uplink
+if probe tcp "$A" "$MA" "$HM" "$GA" "$SVC" 8080 2 > /dev/null && ct nft list table inet vmswitch | grep -c 'set uplinks' > /dev/null; then
+    ok "llm and uplink together"
+else
+    bad "llm and uplink together"
+fi
+[[ $(llmout) == 0 ]] && ok "llm: still nothing forwarded with uplink on" || bad "llm: forwarded with uplink on"
+vs xml ga eth0 | grep -c "route $SVC/32 via $LH" > /dev/null && ok "llm: xml tells the guest its address and route" \
+    || bad "llm: xml tells the guest its address and route"
+vs plug ga eth0 -
+vs plug gb eth0 -
+vs plug gd eth0 -
+if ! ct test -e /sys/class/net/llm0 && ! ct nft list table inet vmswitch > /dev/null 2>&1; then
+    ok "llm: unplug removes llm0 and the table"
+else
+    bad "llm: unplug removes llm0 and the table"
 fi
 echo "vmswitch-e2e: $pass passed, $fail failed"
 ((fail == 0))

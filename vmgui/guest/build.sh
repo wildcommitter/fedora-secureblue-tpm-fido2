@@ -64,16 +64,19 @@ go test ./...
 for arch in amd64 arm64; do
     d=/tmp/vmgui-agent-win11-\$arch && mkdir -p \$d
     CGO_ENABLED=0 GOOS=windows GOARCH=\$arch go build -trimpath -ldflags=-buildid= -o \$d/vmgui-agent.exe ./cmd/vmgui-agent
+    CGO_ENABLED=0 GOOS=windows GOARCH=\$arch go build -trimpath -ldflags=-buildid= -o \$d/llmctl.exe ./cmd/llmctl
     cp /src/win11/*.ps1 \$d/
     touch -d @$SDE \$d/* \$d && (cd /tmp && zip -q -X -r /out/win11/vmgui-agent-win11-\$arch.zip vmgui-agent-win11-\$arch)
     d=/tmp/vmgui-agent-macos-\$arch && mkdir -p \$d
     CGO_ENABLED=0 GOOS=darwin GOARCH=\$arch go build -trimpath -ldflags=-buildid= -o \$d/vmgui-agent ./cmd/vmgui-agent
+    CGO_ENABLED=0 GOOS=darwin GOARCH=\$arch go build -trimpath -ldflags=-buildid= -o \$d/llmctl ./cmd/llmctl
     cp /src/macos/install.sh /src/macos/*.plist \$d/
     tar -C /tmp --sort=name --mtime=@$SDE --owner=0 --group=0 --numeric-owner -czf \
         /out/macos/vmgui-agent-macos-\$arch.tar.gz vmgui-agent-macos-\$arch
 done
 # The e2e's guest: the agent's Linux demo backend.
-mkdir -p /out/test && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o /out/test/vmgui-agent-demo ./cmd/vmgui-agent"
+mkdir -p /out/test && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o /out/test/vmgui-agent-demo ./cmd/vmgui-agent
+CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o /out/test/llmctl ./cmd/llmctl"
 
 echo "vmgui guest addon $VERSION:"
 (cd "$OUT" && find . -type f ! -path './test/*' -printf '  %P\n' | sort)

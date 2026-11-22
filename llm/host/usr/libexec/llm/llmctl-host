@@ -1,0 +1,214 @@
+#!/usr/bin/python3 -I
+"""llmctl-host: answer llmctl requests from guests on vsock port 21000 (llmctl.service).
+See llm/README.md.
+
+  llmctl-host [--cid N] [--port P]     # defaults: any CID, 21000 (others: the e2e)
+
+It listens itself rather than through a socket unit: systemd would create the vsock
+socket with the service's label (unconfined_service_t), which the policy doesn't let
+init_t do. Each connection is handled in a child process, at most 4 at a time.
+
+Only CIDs listed in /etc/llm/clients.conf get an answer. One line in, one JSON line
+out, then the connection closes:
+
+  status            {"ok": true, "up": bool, "model": sha256|null, "ctx": n, "slots": n}
+  models            {"ok": true, "models": [{"sha256": .., "bytes": .., "current": bool}]}
+  use <sha256>      checks the file against its name, points /var/lib/llm/current at it,
+                    restarts llm.service
+  restart           restarts llm.service
+
+No verb takes a path, an argument for podman or a model from the guest.
+"""
+import hashlib
+import http.client
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+
+STATE = os.environ.get("LLM_STATE", "/var/lib/llm")
+CLIENTS = os.environ.get("LLM_CLIENTS", "/etc/llm/clients.conf")
+CONF = os.environ.get("LLM_CONF", "/etc/llm/llm.conf")
+SOCK = os.environ.get("LLM_SOCK", "/run/llm/llm.sock")
+SYSTEMCTL = os.environ.get("LLM_SYSTEMCTL", "/usr/bin/systemctl")
+SHA = re.compile(r"[0-9a-f]{64}")
+
+
+def log(msg):
+    print(f"llmctl-host: {msg}", file=sys.stderr, flush=True)
+
+
+def allowed():
+    """CIDs from clients.conf: one per line, # comments."""
+    out = set()
+    try:
+        with open(CLIENTS) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line.isdigit():
+                    out.add(int(line))
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def conf():
+    c = {"CTX": 16384, "SLOTS": 4}
+    try:
+        with open(CONF) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k in c and v.isdigit():
+                    c[k] = int(v)
+    except FileNotFoundError:
+        pass
+    return c
+
+
+def current():
+    try:
+        name = os.path.basename(os.readlink(os.path.join(STATE, "current")))
+    except OSError:
+        return None
+    sha = name.removesuffix(".gguf")
+    return sha if SHA.fullmatch(sha) else None
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(SOCK)
+
+
+def up():
+    """llama-server's /health (no API key needed) answers 200 once the model is loaded."""
+    try:
+        c = UnixHTTP("localhost", timeout=5)
+        c.request("GET", "/health")
+        return c.getresponse().status == 200
+    except OSError:
+        return False
+
+
+def restart():
+    subprocess.run([SYSTEMCTL, "--no-block", "restart", "llm.service"], check=True,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+
+def models():
+    d = os.path.join(STATE, "models")
+    cur = current()
+    out = []
+    for name in sorted(os.listdir(d)):
+        sha = name.removesuffix(".gguf")
+        if name.endswith(".gguf") and SHA.fullmatch(sha):
+            out.append({"sha256": sha, "bytes": os.stat(os.path.join(d, name)).st_size, "current": sha == cur})
+    return out
+
+
+def use(sha):
+    if not SHA.fullmatch(sha):
+        raise ValueError("use: expects a sha256")
+    path = os.path.join(STATE, "models", sha + ".gguf")
+    if not os.path.isfile(path):
+        raise ValueError("use: no such model (llm import adds models on the host)")
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while b := f.read(1 << 22):
+            h.update(b)
+    if h.hexdigest() != sha:
+        raise ValueError("use: the file doesn't match its sha256; not selected")
+    tmp = os.path.join(STATE, ".current.tmp")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    os.symlink(os.path.join("models", sha + ".gguf"), tmp)
+    os.replace(tmp, os.path.join(STATE, "current"))
+    restart()
+
+
+def handle(line):
+    verb, _, arg = line.partition(" ")
+    if verb == "status" and not arg:
+        c = conf()
+        return {"up": up(), "model": current(), "ctx": c["CTX"], "slots": c["SLOTS"]}
+    if verb == "models" and not arg:
+        return {"models": models()}
+    if verb == "restart" and not arg:
+        restart()
+        return {}
+    if verb == "use" and arg:
+        use(arg)
+        return {"model": arg}
+    raise ValueError("unknown request (status, models, use <sha256>, restart)")
+
+
+def serve(s, cid):
+    if cid not in allowed():
+        log(f"CID {cid} not in {CLIENTS}: closed")
+        return
+    s.settimeout(10)
+    buf = b""
+    try:
+        while b"\n" not in buf and len(buf) <= 256:
+            b = s.recv(257 - len(buf))
+            if not b:
+                break
+            buf += b
+    except OSError:
+        return
+    line = buf.partition(b"\n")[0].decode("ascii", "replace").strip()
+    if len(buf) > 256 and b"\n" not in buf:
+        line = ""
+    log(f"CID {cid}: {line[:80]!r}")
+    try:
+        reply = {"ok": True, **handle(line)}
+    except (ValueError, OSError, subprocess.CalledProcessError) as e:
+        reply = {"ok": False, "error": str(e)}
+    s.sendall((json.dumps(reply) + "\n").encode())
+    s.close()
+
+
+def main(argv):
+    cid, port = socket.VMADDR_CID_ANY, 21000
+    while argv:
+        opt, val, argv = argv[0], argv[1:2], argv[2:]
+        if opt not in ("--cid", "--port") or not val or not val[0].isdigit():
+            sys.exit("usage: llmctl-host [--cid N] [--port P]")
+        if opt == "--cid":
+            cid = int(val[0])
+        else:
+            port = int(val[0])
+    ls = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    ls.bind((cid, port))
+    ls.listen(8)
+    log(f"listening on vsock port {port}")
+    children = set()
+    while True:
+        while children:   # reap
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if not pid:
+                break
+            children.discard(pid)
+        conn, (peer, _) = ls.accept()
+        if len(children) >= 4:
+            log(f"CID {peer}: busy, closed")
+            conn.close()
+            continue
+        pid = os.fork()
+        if pid == 0:
+            ls.close()
+            signal.alarm(110)   # a child never outlives a request (use: one hash)
+            try:
+                serve(conn, peer)
+            finally:
+                os._exit(0)
+        children.add(pid)
+        conn.close()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

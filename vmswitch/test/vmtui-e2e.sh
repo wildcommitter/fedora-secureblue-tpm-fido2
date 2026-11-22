@@ -52,19 +52,20 @@ echo "$d"
 if grep -q '^▾ red' <<< "$d" && grep -q '└─ work/eth0 *work *eth0' <<< "$d" \
    && grep -q '^▾ (no network)' <<< "$d" && grep -q '└─ browser/eth0' <<< "$d" \
    && grep -q '^▾ uplink (internet only)' <<< "$d" \
+   && grep -q '^▾ llm (model server only)' <<< "$d" \
    && grep -q 'xHCI Host Controller.*hub (host)' <<< "$d" && grep -q 'Virtual FIDO key .*#5 1209:7f1d *1-2 *block' <<< "$d"; then
     ok "--dump shows networks, NICs, uplink and USB"
 else
     bad "--dump"
 fi
 
-# Rows: red, work/eth0, blue, uplink, (no network), browser/eth0, USB, hub, FIDO.
-# 5 down -> browser/eth0; p; picker [blue, red, uplink, -] starts on its current
-# network (-): 1 up -> uplink.
-# Then (no network) is gone: cursor 5 = USB; 2 down -> FIDO; a; picker [browser, work].
+# Rows: red, work/eth0, blue, uplink, llm, (no network), browser/eth0, USB, hub, FIDO.
+# 6 down -> browser/eth0; p; picker [blue, red, uplink, llm, -] starts on its current
+# network (-): 2 up -> uplink.
+# Then (no network) is gone: cursor 6 = USB; 2 down -> FIDO; a; picker [browser, work].
 ct sh -c ': > /stub/calls'
 if ct python3 -I /vstest/ptydrive.py /tmp/screen \
-     '{down}{down}{down}{down}{down}p{pause}{up}\n{pause}{down}{down}a{pause}\n{pause}nlab\n{pause}q' \
+     '{down}{down}{down}{down}{down}{down}p{pause}{up}{up}\n{pause}{down}{down}a{pause}\n{pause}nlab\n{pause}q' \
      -- vmtui; then
     ok "q exits cleanly"
 else

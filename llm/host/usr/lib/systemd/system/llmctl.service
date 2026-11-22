@@ -1,0 +1,39 @@
+# llmctl for guests (llm/README.md): fixed verbs over vsock port 21000, answered only
+# for CIDs in /etc/llm/clients.conf (llm allow); one child process per connection.
+# Root, for `systemctl restart llm.service` and the model symlink, but without
+# capabilities: it reads root's files and nothing else, and writes only /var/lib/llm.
+[Unit]
+Description=llm: llmctl for guests (vsock)
+ConditionPathExists=/etc/llm/clients.conf
+Documentation=file:///usr/share/doc/llm/README.md
+
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/libexec/llm/llmctl-host
+StandardError=journal
+Restart=on-failure
+SupplementaryGroups=llm
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/llm
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_VSOCK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

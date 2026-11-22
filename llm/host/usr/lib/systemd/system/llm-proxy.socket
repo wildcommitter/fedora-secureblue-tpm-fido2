@@ -1,0 +1,14 @@
+# The guests' endpoint (llm/README.md): one address, one port. 10.89.255.1 sits on
+# vmswitch's llm interface; FreeBind lets this socket come up before it does.
+[Unit]
+Description=llm: endpoint for guests on the vmswitch llm network
+Documentation=file:///usr/share/doc/llm/README.md
+ConditionPathExists=/var/lib/llm/current
+
+[Socket]
+ListenStream=10.89.255.1:8080
+FreeBind=yes
+NoDelay=yes
+
+[Install]
+WantedBy=sockets.target

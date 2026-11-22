@@ -31,6 +31,26 @@ The `inet` table exists only while a NIC is on `uplink`, and vmswitch then turns
 **only** uplink flows. That breaks rootful container bridge networks; this image has
 none. Uplink guests are isolated from each other too. No IPv6.
 
+### llm (the host's model server)
+
+`llm` is the second built-in routed network. It leads to one place: the host's model
+server ([llm/README.md](../llm/README.md)) at `10.89.255.1:8080`. While a NIC is on it,
+vmswitch keeps a dummy interface `llm0` holding `10.89.255.1/32`. Each NIC gets its own
+/30: host `10.89.N.1`, guest `10.89.N.2` (N up to 254). The guest sets its address and a
+route to `10.89.255.1/32` via `10.89.N.1`; `vmswitch xml` prints both.
+
+| Table | Rule |
+|---|---|
+| `netdev vmswitch` ingress | ARP from the NIC's MAC and address, and TCP from them to `10.89.255.1:8080`. Nothing else |
+| `netdev vmswitch` egress | The host's ARP (from `10.89.N.1` or `10.89.255.1`: the kernel's ARP carries the reply's source), and TCP from `10.89.255.1:8080` to the guest |
+| `inet vmswitch` input | `iifname @llms ip daddr 10.89.255.1 tcp dport 8080 accept`, before `iifname "vs*" drop` |
+| `inet vmswitch` forward | Nothing from an llm NIC is forwarded: its ingress hook already drops it, and the forward chain (with uplink) accepts only uplink flows |
+
+| firewalld zone `vmswitch-llm` | Bound by source to the llm /30s (`10.89.0.0`–`10.89.254.255`); one rich rule accepts TCP to `10.89.255.1:8080`, the zone's default target rejects the rest. firewalld's own input chain rejects what no zone allows, whatever `inet vmswitch` accepted (found by the KVM e2e: ICMP "administratively prohibited"). Strict `rp_filter` drops those sources on any other interface |
+
+llm guests reach neither each other, the LAN, the internet nor any other host port, the
+NIC's own host address included. Turning on `ip_forward` isn't needed for llm.
+
 ### USB to guests (usbguard)
 
 usbguard's policy decides what the host uses. A device the policy doesn't allow stays
@@ -121,8 +141,14 @@ The checks:
   - the LAN and a spoofed source don't leave
   - the uplink NIC is off the switched networks
   - unplugging removes the routing table and the host address
+- llm, with listeners on `10.89.255.1:8080`, `:22` and the NIC's host end:
+  - `llm0` holds `10.89.255.1`, and the host answers ARP
+  - a SYN to `10.89.255.1:8080` gets a SYN-ACK (`tapprobe.py tcp` answers the host's ARP like a guest)
+  - port 22, the host end, a ping and a spoofed source get nothing
+  - one llm guest can't reach another, and nothing leaves for the internet, with uplink on too
+  - `xml` prints the guest's address and route; unplugging removes `llm0` and the table
 
-The host's network namespace is never touched. Result: 15 passed, 0 failed. `/proc/sys`
+The host's network namespace is never touched. Result: 28 passed, 0 failed. `/proc/sys`
 is read-only in a container, so turning on `ip_forward` is left to the KVM e2e.
 
 `test/vmswitch-usb-e2e.sh` tests the USB logic with stubs. `usbguard` and `virsh` are

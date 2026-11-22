@@ -34,7 +34,7 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`, or to `vmgui-wire` for `PROTO=wire` guests), `guest/` (the topology: `linux/` rpm+deb × wlroots/xorg, `agent/` Go vmgui-agent for win11/macos, `build.sh`), `PROTOCOL.md` (wire protocol), `test/` |
 | `vmswitch/` | Guests' network switch: TAPs + one nftables table (`netdev`: dup to peers; `inet`: routed `uplink`), USB to guests (usbguard + libvirt hostdev), `vmtui` (curses tree table), `usbguard-firstboot` |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
-| `llm/` | Model server image (llama.cpp from a pinned tag, Vulkan) for the host GPU; design and status in `llm/README.md` |
+| `llm/` | Host model server for the guests: `Containerfile` + `build.sh` (llama.cpp from a pinned tag, Vulkan, reproducible), `host/` (`llm` CLI, `llm.service` = rootful podman without a user namespace, `llm-proxy` socket → unix socket, `llmctl-host` on vsock), `test/`; guest `llmctl` lives in `vmgui/guest` |
 | `test/bootc/` | tokenvault e2e, Secure Boot enrollment e2e and the duress reset e2e on the sealed image |
 
 ## Hard rules
@@ -106,7 +106,7 @@ and `/usr/libexec/tokenvault/check-uki` (from `image/files-luks/`) on the signed
   in the image (`/usr/share/secureblue/uki/keys/`, copied by `uki/Containerfile.base`).
   `secure-boot-keys.sh` accepts both.
 - **Building `image/Containerfile` by hand** needs `--build-context lockscreen=../lockscreen
-  --build-context vmgui=../vmgui --build-context vmswitch=../vmswitch`.
+  --build-context vmgui=../vmgui --build-context vmswitch=../vmswitch --build-context llm=../llm`.
   `build.sh` passes it.
 - **`uki/` is vendored.** Our changes are marked `scroll-secure:`. Re-apply them when
   re-vendoring, and update `uki/VENDORED`.
@@ -135,6 +135,8 @@ vmswitch/test/vmswitch-usb-e2e.sh                      # USB attach logic, stub 
 vmswitch/test/vmtui-e2e.sh                             # the TUI in a pty against the real switch
 image/repro-lint-test.sh                               # repro-lint catches each broken premise (mutations)
 llm/build.sh                                           # llm-server image -> llm/out/llm-server.oci.tar (reproducible)
+llm/test/llm-e2e.sh                                    # llmctl over vsock loopback + the real server on this GPU (no root)
+test/bootc/llm-vm-e2e.py --work <w>                    # llm import, units, endpoint, llmctl, reboot on the sealed image (CPU)
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
@@ -199,6 +201,11 @@ Work directories (`**/work/`) hold multi-GB disks and are git-ignored.
   files are random (not reproducible), and without `-shm` a WAL database can't be opened
   read-only (chunkah, `rpm -q` on the booted `/usr`). `dnf-settle` checkpoints and switches
   them to rollback-journal mode; run it after any dnf or rpm step in a shipped stage.
+- **No user namespaces for containers on secureblue:** `harden_userns` and
+  `harden_container_userns` (SELinux) deny `user_namespace create`, also to
+  `container_runtime_domain`. Rootless podman and `--userns=auto` fail. `llm.service` runs
+  rootful podman with the host's user namespace and `--user llm` instead; don't
+  "fix" it with `ujust set-container-userns on` (weakens every container).
 - **`FROM oci:out`** in the same build as the chunkah stage that writes `./out` races:
   buildah can resolve it first. It lives in `uki/Containerfile.chunked`, its own build.
 

@@ -1,0 +1,191 @@
+#!/usr/bin/python3 -I
+"""llm: the host's model server (llm/README.md). Run as root.
+
+  llm status                  units, model, image, allowed CIDs
+  llm import DIR              a payload dir: SHA256SUMS, llm-server.oci.tar, one .gguf;
+                              checks every sha256, loads the image, adds the model,
+                              creates the API key if there is none, starts the server
+  llm use SHA256              select a model already in /var/lib/llm/models
+  llm key [show|rotate]       the API key guests send (Authorization: Bearer ...)
+  llm allow CID / deny CID    the guests llmctl answers (/etc/llm/clients.conf)
+"""
+import hashlib
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+
+STATE = os.environ.get("LLM_STATE", "/var/lib/llm")
+ETC = os.environ.get("LLM_ETC", "/etc/llm")
+CLIENTS = os.path.join(ETC, "clients.conf")
+IMAGE = "localhost/llm-server:latest"
+SECRET = "llm-api-key"
+POLICY = "/usr/share/llm/load-policy.json"
+SHA = re.compile(r"[0-9a-f]{64}")
+UNITS = ["llm.service", "llm-proxy.socket"]
+
+
+def die(msg):
+    sys.exit(f"llm: {msg}")
+
+
+def run(*cmd, **kw):
+    return subprocess.run(cmd, check=True, **kw)
+
+
+def out(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while b := f.read(1 << 22):
+            h.update(b)
+    return h.hexdigest()
+
+
+def current():
+    try:
+        sha = os.path.basename(os.readlink(os.path.join(STATE, "current"))).removesuffix(".gguf")
+    except OSError:
+        return None
+    return sha if SHA.fullmatch(sha) else None
+
+
+def has_key():
+    return subprocess.run(["podman", "secret", "exists", SECRET]).returncode == 0
+
+
+def make_key(replace=False):
+    key = "llm-" + secrets.token_urlsafe(32)
+    run("podman", "secret", "create", *(["--replace"] if replace else []), SECRET, "-",
+        input=key.encode(), stdout=subprocess.DEVNULL)
+
+
+def select(sha):
+    tmp = os.path.join(STATE, ".current.tmp")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    os.symlink(os.path.join("models", sha + ".gguf"), tmp)
+    os.replace(tmp, os.path.join(STATE, "current"))
+
+
+def cids():
+    try:
+        with open(CLIENTS) as f:
+            return [int(l.split("#", 1)[0]) for l in f if l.split("#", 1)[0].strip().isdigit()]
+    except FileNotFoundError:
+        return []
+
+
+def write_cids(new):
+    os.makedirs(ETC, mode=0o755, exist_ok=True)
+    tmp = CLIENTS + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("# Guest CIDs llmctl answers (llm allow / llm deny), one per line.\n")
+        f.writelines(f"{c}\n" for c in sorted(set(new)))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, CLIENTS)
+
+
+def status():
+    for u in UNITS + ["llm-proxy.service", "llmctl.service"]:
+        print(f"{u:20} {out('systemctl', 'is-enabled', u) or '-':10} {out('systemctl', 'is-active', u)}")
+    print(f"model                {current() or 'none (llm import)'}")
+    img = out("podman", "image", "inspect", IMAGE, "--format", "{{.Id}}")
+    print(f"image                {img[:19] or 'none (llm import)'}")
+    print(f"API key              {'set (llm key show)' if has_key() else 'none'}")
+    print(f"llmctl CIDs          {' '.join(map(str, cids())) or 'none (llm allow CID)'}")
+
+
+def import_(d):
+    sums = {}
+    with open(os.path.join(d, "SHA256SUMS")) as f:
+        for line in f:
+            m = re.fullmatch(r"([0-9a-f]{64})  \*?([\w.+-]+)\n?", line)
+            if not m:
+                die(f"{d}/SHA256SUMS: bad line {line.strip()[:60]!r}")
+            sums[m.group(2)] = m.group(1)
+    ggufs = [n for n in sums if n.endswith(".gguf")]
+    if "llm-server.oci.tar" not in sums or len(ggufs) != 1:
+        die(f"{d}/SHA256SUMS must list llm-server.oci.tar and one .gguf")
+    for name, want in sums.items():
+        print(f"llm: checking {name}", flush=True)
+        if sha256(os.path.join(d, name)) != want:
+            die(f"{name}: sha256 mismatch")
+    # secureblue's /etc/containers/policy.json rejects unsigned images, local archives too.
+    # This archive's sha256 was just checked against SHA256SUMS (the payload's pin, like
+    # the model's), so this one load gets a policy that accepts an oci-archive and
+    # nothing else; the global policy stays as it is.
+    run("podman", "load", "-q", "--signature-policy", POLICY, "-i", os.path.join(d, "llm-server.oci.tar"),
+        stdout=subprocess.DEVNULL)
+    if not out("podman", "image", "inspect", IMAGE, "--format", "{{.Id}}"):
+        die(f"the archive doesn't hold {IMAGE}")
+    sha = sums[ggufs[0]]
+    dst = os.path.join(STATE, "models", sha + ".gguf")
+    if not os.path.exists(dst):
+        print(f"llm: copying {ggufs[0]} -> {dst}", flush=True)
+        tmp = dst + ".tmp"
+        shutil.copyfile(os.path.join(d, ggufs[0]), tmp)
+        os.chmod(tmp, 0o640)
+        shutil.chown(tmp, "root", "llm")
+        if sha256(tmp) != sha:
+            os.unlink(tmp)
+            die("the copy doesn't match its sha256")
+        os.replace(tmp, dst)
+    if not current():
+        select(sha)
+    if not has_key():
+        make_key()
+    run("systemctl", "enable", "--now", *UNITS)
+    print(f"llm: serving {current()}; guests need the key (llm key show) and a NIC on vmswitch's llm network")
+
+
+def use(sha):
+    if not SHA.fullmatch(sha):
+        die("use: expects a sha256 (llm status, ls /var/lib/llm/models)")
+    path = os.path.join(STATE, "models", sha + ".gguf")
+    if not os.path.isfile(path):
+        die(f"use: no {path}")
+    if sha256(path) != sha:
+        die(f"use: {path} doesn't match its sha256")
+    select(sha)
+    run("systemctl", "restart", "llm.service")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    if os.geteuid() != 0:
+        die("run as root")
+    verb, args = argv[0], argv[1:]
+    if verb == "status" and not args:
+        status()
+    elif verb == "import" and len(args) == 1:
+        import_(args[0])
+    elif verb == "use" and len(args) == 1:
+        use(args[0])
+    elif verb == "key" and args in ([], ["show"]):
+        if not has_key():
+            die("no key yet (llm import, or llm key rotate)")
+        print(out("podman", "secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", SECRET))
+    elif verb == "key" and args == ["rotate"]:
+        make_key(replace=has_key())
+        if out("systemctl", "is-active", "llm.service") == "active":
+            run("systemctl", "restart", "llm.service")
+        print("llm: new key; give it to the guests again (llm key show)")
+    elif verb in ("allow", "deny") and len(args) == 1 and args[0].isdigit() and int(args[0]) > 2:
+        c = int(args[0])
+        new = cids() + [c] if verb == "allow" else [x for x in cids() if x != c]
+        write_cids(new)
+        run("systemctl", "enable", "--now", "llmctl.service")
+    else:
+        die("usage: llm status | import DIR | use SHA256 | key [show|rotate] | allow CID | deny CID")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

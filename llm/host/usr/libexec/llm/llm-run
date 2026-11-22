@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# llm-run: start the model server container for llm.service (llm/README.md). Rootful
+# podman with the host's user namespace, because secureblue's harden_container_userns
+# denies container runtimes a new one; the server runs as the `llm` uid with no
+# capabilities, no network at all (--network=none) and a read-only root, and listens
+# only on /run/llm/llm.sock. llm-proxy.socket puts that socket on the guests' address.
+#
+#   llm-run start        # ExecStart (podman run -d, sd_notify through conmon)
+#   llm-run stop         # ExecStop
+#   llm-run args         # print the podman command line (tests, `llm status`)
+#
+# Settings: /etc/llm/llm.conf (KEY=value lines: CTX, SLOTS, DEVICE; DEVICE=none runs on
+# the CPU, for a host without a GPU such as the lab VM), the model is
+# /var/lib/llm/current (a symlink into /var/lib/llm/models), the API key is the podman
+# secret llm-api-key (`llm key`).
+set -euo pipefail
+
+die() { echo "llm-run: $*" >&2; exit 1; }
+
+IMAGE=localhost/llm-server:latest
+STATE=${LLM_STATE:-/var/lib/llm}
+CONF=${LLM_CONF:-/etc/llm/llm.conf}
+CTX=16384
+SLOTS=4
+DEVICE=/dev/dri/renderD128
+
+if [[ -r "${CONF}" ]]; then
+    while IFS='=' read -r k v; do
+        case "${k}" in
+            CTX | SLOTS) [[ "${v}" =~ ^[0-9]+$ ]] || die "${CONF}: ${k} is not a number"; printf -v "${k}" '%s' "${v}" ;;
+            DEVICE) [[ "${v}" =~ ^(/dev/dri/renderD[0-9]+|none)$ ]] || die "${CONF}: DEVICE is a render node or none"; DEVICE=${v} ;;
+            '' | \#*) ;;
+            *) die "${CONF}: unknown key ${k}" ;;
+        esac
+    done < "${CONF}"
+fi
+
+podman_args() {
+    local model uid gid render
+    model=$(readlink -e "${STATE}/current") || die "no model selected (${STATE}/current): llm import or llm use"
+    [[ "${model}" == "${STATE}"/models/*.gguf ]] || die "${STATE}/current points outside ${STATE}/models"
+    uid=$(id -u llm)
+    gid=$(id -g llm)
+    render=$(getent group render | cut -d: -f3)
+    [[ -n "${render}" ]] || die "no render group"
+    local dev=(--device="${DEVICE}" --group-add="${render}")
+    [[ "${DEVICE}" != none ]] || dev=()
+    args=(
+        podman run --name llm --replace --rm -d
+        --cidfile=/run/llm.cid --cgroups=split --sdnotify=conmon
+        --pull=never --network=none --read-only
+        --cap-drop=all --security-opt=no-new-privileges
+        --user="${uid}:${gid}" --umask=0007
+        --pids-limit=256
+        --env=MESA_SHADER_CACHE_DISABLE=true
+        "${dev[@]}"
+        --volume=/run/llm:/run/llm:z
+        --volume="${model}:/models/model.gguf:ro,z"
+        --secret="llm-api-key,target=/run/secrets/llm-api-key,mode=0400,uid=${uid}"
+        "${IMAGE}"
+        --host /run/llm/llm.sock --port 8080
+        -m /models/model.gguf -ngl 999 -c "${CTX}" -np "${SLOTS}"
+        --api-key-file /run/secrets/llm-api-key --no-slots
+    )
+}
+
+case "${1:-}" in
+    start)
+        podman_args
+        rm -f /run/llm/llm.sock
+        exec "${args[@]}"
+        ;;
+    stop)
+        exec podman rm -f -i --cidfile=/run/llm.cid
+        ;;
+    args)
+        podman_args
+        printf '%q ' "${args[@]}"
+        echo
+        ;;
+    *) die "usage: llm-run start|stop|args" ;;
+esac

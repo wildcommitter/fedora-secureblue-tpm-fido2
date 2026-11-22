@@ -1,0 +1,23 @@
+# The model server (llm/README.md): llama-server in podman on the host GPU, as the
+# llm uid, no network, listening on /run/llm/llm.sock. Off until a model is imported.
+[Unit]
+Description=llm: llama.cpp model server on the host GPU
+Documentation=file:///usr/share/doc/llm/README.md
+ConditionPathExists=/var/lib/llm/current
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+Delegate=yes
+KillMode=mixed
+ExecStart=/usr/libexec/llm/llm-run start
+ExecStop=/usr/libexec/llm/llm-run stop
+ExecStopPost=/usr/libexec/llm/llm-run stop
+Restart=on-failure
+RestartSec=10
+# Loading 22 GB into VRAM takes a while.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

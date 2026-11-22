@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- vmswitch's llm network (vmswitch/README.md): guests on it reach the host's model
+     server at 10.89.255.1:8080 and nothing else. firewalld's input chain rejects
+     anything a zone doesn't allow, independently of vmswitch's nftables table, so the
+     llm NICs' /30s (10.89.N.2, N < 255) get this zone by source. rp_filter (strict on
+     secureblue) drops those sources on any other interface. -->
+<zone>
+  <short>vmswitch-llm</short>
+  <description>Guests on vmswitch's llm network: the model server only.</description>
+  <source address="10.89.0.0/17"/>
+  <source address="10.89.128.0/18"/>
+  <source address="10.89.192.0/19"/>
+  <source address="10.89.224.0/20"/>
+  <source address="10.89.240.0/21"/>
+  <source address="10.89.248.0/22"/>
+  <source address="10.89.252.0/23"/>
+  <source address="10.89.254.0/24"/>
+  <rule family="ipv4">
+    <destination address="10.89.255.1/32"/>
+    <port port="8080" protocol="tcp"/>
+    <accept/>
+  </rule>
+</zone>

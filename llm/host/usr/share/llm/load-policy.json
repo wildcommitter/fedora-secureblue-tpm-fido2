@@ -1,0 +1,6 @@
+{
+    "default": [{"type": "reject"}],
+    "transports": {
+        "oci-archive": {"": [{"type": "insecureAcceptAnything"}]}
+    }
+}

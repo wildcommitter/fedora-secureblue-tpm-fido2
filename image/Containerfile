@@ -193,10 +193,25 @@ COPY --from=vmswitch README.md /usr/share/doc/vmswitch/README.md
 RUN --network=${RUN_NETWORK} for f in /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui; do /usr/bin/python3 -I -m py_compile "$f"; done \
  && find /usr/libexec/vmswitch /usr/bin -maxdepth 1 -name __pycache__ -exec rm -rf {} + \
  && test "$(readlink /usr/bin/vmswitch)" = ../libexec/vmswitch/vmswitch \
+ && firewall-offline-cmd --info-zone=vmswitch-llm | grep -q 'rule family="ipv4" destination address="10.89.255.1/32" port port="8080" protocol="tcp" accept' \
  && ! test -s /etc/usbguard/rules.conf \
  && systemctl enable vmswitch.service usbguard-firstboot.service usbguard.service \
  && semodule -i /usr/share/selinux/packages/vmswitch/vmswitch.cil \
  && semodule -l | grep -qx vmswitch
+
+# llm (../llm, the `llm` build context): the host's model server for the guests
+# (llm/README.md). Units only: the server image and the model come from a payload
+# (`llm import`), so llm.service and llm-proxy.socket stay off until then. llm.cil
+# lets the confined systemd-socket-proxyd reach the server's socket (and nothing more).
+COPY --from=llm host/ /
+COPY --from=llm README.md /usr/share/doc/llm/README.md
+RUN --network=${RUN_NETWORK} for f in /usr/bin/llm /usr/libexec/llm/llmctl-host; do /usr/bin/python3 -I -m py_compile "$f"; done \
+ && find /usr/bin /usr/libexec/llm -maxdepth 1 -name __pycache__ -exec rm -rf {} + \
+ && bash -n /usr/libexec/llm/llm-run \
+ && test -x /usr/lib/systemd/systemd-socket-proxyd \
+ && ! test -e /etc/llm \
+ && semodule -i /usr/share/selinux/packages/llm/llm.cil \
+ && semodule -l | grep -qx llm
 
 COPY files/ /
 # Our scroll config (files/etc/scroll/config, niri-style) replaces the stock one. It
@@ -242,6 +257,7 @@ RUN --network=${RUN_NETWORK} chmod 0755 /usr/libexec/scroll-headless /usr/libexe
       /usr/libexec/scroll-secure/wayland-session /usr/libexec/scroll-secure/check-hardening \
       /usr/libexec/scroll-secure/check-virt /usr/libexec/vmgui/vmgui-host /usr/bin/vmgui \
       /usr/libexec/vmswitch/vmswitch /usr/bin/vmtui \
+      /usr/bin/llm /usr/libexec/llm/llm-run /usr/libexec/llm/llmctl-host \
  && /usr/libexec/scroll-secure/check-virt \
  && bootc container lint
 

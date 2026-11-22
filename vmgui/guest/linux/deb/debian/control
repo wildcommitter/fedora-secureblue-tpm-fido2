@@ -12,6 +12,7 @@ Depends: waypipe, python3, systemd, ${misc:Depends}
 Description: show this VM's windows on the host's scroll session (vmgui)
  Runs waypipe server on a vmgui display in the user session and forwards each
  app over vsock to the host, where vmgui-host draws it framed in the VM's color.
+ Also llmctl, which controls the host's model server over vsock.
 
 Package: vmgui-guest-wlroots
 Architecture: all

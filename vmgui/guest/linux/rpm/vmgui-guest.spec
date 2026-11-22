@@ -13,6 +13,7 @@ Requires(post): systemd
 %description
 Runs waypipe server on a vmgui display in the user session and forwards each
 app over vsock to the host, where vmgui-host draws it framed in the VM's color.
+Also llmctl, which controls the host's model server over vsock (llm/README.md).
 
 %package wlroots
 Summary:        vmgui: native Wayland apps default to the vmgui display
@@ -51,6 +52,7 @@ systemctl --global enable vmgui-xorg.service >/dev/null 2>&1 || :
 
 %files
 /usr/libexec/vmgui/vmgui-guest
+/usr/bin/llmctl
 /usr/lib/systemd/user/vmgui-guest.service
 
 %files wlroots

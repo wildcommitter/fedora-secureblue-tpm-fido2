@@ -1,0 +1,16 @@
+; llm (llm/README.md): systemd-socket-proxyd relays the guests' endpoint to the model
+; server's unix socket. Fedora confines it as systemd_socket_proxyd_t, which may bind
+; neither 8080 (http_cache_port_t) nor reach a container's socket; podman's :z gives
+; /run/llm and the socket in it container_file_t, and the server runs as container_t.
+; The unit's sandbox sets no_new_privs, so init_t needs nnp_transition into the domain
+; (what Fedora's init_nnp_daemon_domain grants). Only these rules, for this one domain.
+(allow init_t systemd_socket_proxyd_t (process2 (nnp_transition nosuid_transition)))
+(allow systemd_socket_proxyd_t http_cache_port_t (tcp_socket (name_bind)))
+(allow systemd_socket_proxyd_t container_file_t (dir (search getattr)))
+(allow systemd_socket_proxyd_t container_file_t (sock_file (write getattr)))
+(allow systemd_socket_proxyd_t container_t (unix_stream_socket (connectto)))
+; Its log lines go to the journal (its socket is kernel_t: PID 1 made it); libsystemd's namespace and pidfs probes are harmless.
+(allow systemd_socket_proxyd_t syslogd_var_run_t (sock_file (write getattr)))
+(allow systemd_socket_proxyd_t kernel_t (unix_dgram_socket (sendto)))
+(dontaudit systemd_socket_proxyd_t nsfs_t (file (getattr)))
+(dontaudit systemd_socket_proxyd_t pidfs_t (filesystem (getattr)))

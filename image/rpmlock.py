@@ -77,7 +77,7 @@ def build_stages(prefix, keydir, only=None):
             "--secret", f"id=pcr_key,src={keydir}/k"]
     uki = ["--build-arg", f"RELEASE={release}", "--build-arg", f"MINIMAL_DIGEST={arg('MINIMAL_DIGEST')}"]
     ctx = ["--build-arg", "RUN_NETWORK=host", "--build-context", "lockscreen=../lockscreen", "--build-context", "vmgui=../vmgui",
-           "--build-context", "vmswitch=../vmswitch"]
+           "--build-context", "vmswitch=../vmswitch", "--build-context", "llm=../llm"]
     t = lambda s: f"{prefix}-lock-{s}"
     steps = [
         (["-f", "Containerfile", *ctx, "--target", "scroll-build"], "scroll-build", img["fedora"]),

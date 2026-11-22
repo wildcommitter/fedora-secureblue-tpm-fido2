@@ -1,0 +1,37 @@
+# Relays the guests' connections to the server's unix socket. It needs nothing but
+# that socket: no network namespace of its own, AF_UNIX only, no privileges.
+[Unit]
+Description=llm: relay from the guests' endpoint to the server socket
+Documentation=file:///usr/share/doc/llm/README.md
+Requires=llm-proxy.socket llm.service
+After=llm-proxy.socket llm.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=64 /run/llm/llm.sock
+DynamicUser=yes
+SupplementaryGroups=llm
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077

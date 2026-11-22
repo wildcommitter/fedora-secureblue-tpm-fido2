@@ -21,6 +21,8 @@ import sys
 VMSWITCH = os.environ.get("VMTUI_VMSWITCH", "/usr/libexec/vmswitch/vmswitch")
 VIRSH = ("virsh", "-q", "-c", "qemu:///system")
 UPLINK = "uplink"
+LLM = "llm"
+PREFIX = {UPLINK: 88, LLM: 89}   # routed networks: 10.<prefix>.<slot>.2/30 for the guest
 COLS = (("NAME", 30), ("GUEST", 14), ("NIC", 8), ("MAC / ID", 19), ("TAP / PORT", 14), ("STATE", 0))
 
 
@@ -57,7 +59,8 @@ class Row:
 def tree(table, usb, folded):
     """Flatten the tree into rows: branches (net, usb) and leaves (nic, dev)."""
     rows = []
-    groups = [(n, n) for n in table["nets"]] + [(UPLINK, "uplink (internet only)"), (None, "(no network)")]
+    groups = [(n, n) for n in table["nets"]] + [(UPLINK, "uplink (internet only)"), (LLM, "llm (model server only)"),
+                                                (None, "(no network)")]
     for net, label in groups:
         nics = sorted(k for k, n in table["nics"].items() if n["net"] == net)
         if net is None and not nics:
@@ -70,7 +73,8 @@ def tree(table, usb, folded):
         for i, k in enumerate(nics):
             n = table["nics"][k]
             guest, nic = k.split("/", 1)
-            state = f"10.88.{n['uplink']}.2/30" if net == UPLINK else ""
+            slot = n.get("slot", n.get("uplink"))
+            state = f"10.{PREFIX[net]}.{slot}.2/30" if net in PREFIX else ""
             rows.append(Row(1, "nic", k, [k, guest, nic, n["mac"], n["tap"], state], i == len(nics) - 1))
     mark = "▸" if "@usb" in folded else "▾"
     rows.append(Row(0, "usb", "@usb", [f"{mark} USB", "", "", "", "", f"{len(usb)} device(s)"]))
@@ -189,7 +193,7 @@ class UI:
             self.msg = ""
             self.reload()
         elif k == ord("p") and row and row.kind == "nic":
-            items = [*self.table["nets"], UPLINK, "- (no network)"]
+            items = [*self.table["nets"], UPLINK, LLM, "- (no network)"]
             now = self.table["nics"][row.key]["net"]
             net = self.pick(f"plug {row.key} into", items,
                             items.index(now) if now in items else len(items) - 1)
@@ -218,7 +222,7 @@ class UI:
             if guest and nic:
                 self.run_vs("nic", "add", guest, nic)
         elif k == ord("D") and row and row.kind in ("net", "nic"):
-            if row.kind == "net" and row.key in (UPLINK, "-"):
+            if row.kind == "net" and row.key in (UPLINK, LLM, "-"):
                 self.msg = "built in"
             elif self.pick(f"delete {row.key}?", ["no", "yes"]) == "yes":
                 if row.kind == "net":

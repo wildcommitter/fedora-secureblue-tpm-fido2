@@ -65,6 +65,9 @@ into `vmgui/guest/out/`:
   [PROTOCOL.md](PROTOCOL.md). On the host, `vmgui add --os win11|macos` writes `PROTO=wire`,
   and vmgui-host runs `vmgui-wire` instead of waypipe client: same security context, same
   confinement, same CID check.
+- **llmctl** comes with every target (`vmgui-guest` on Linux, next to `vmgui-agent` in the
+  zip and tarball). It controls the host's model server over vsock; see
+  [llm/README.md](../llm/README.md).
 
 Install in the guest:
 

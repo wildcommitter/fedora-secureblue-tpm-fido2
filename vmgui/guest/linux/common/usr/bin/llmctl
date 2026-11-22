@@ -1,0 +1,41 @@
+#!/usr/bin/python3 -I
+"""llmctl: control the host's model server from a guest (llm/README.md). Talks to
+llmctl-host over vsock (host CID 2, port 21000); the host answers only CIDs listed
+with `llm allow CID`. The inference API itself is http://10.89.255.1:8080/v1 on a NIC
+plugged into vmswitch's llm network, with the key from `llm key show` on the host.
+
+  llmctl status | models | restart | use SHA256
+"""
+import json
+import os
+import socket
+import sys
+
+# LLMCTL_HOST_CID=1 (vsock loopback) and LLMCTL_PORT are for the e2e only.
+HOST_CID = int(os.environ.get("LLMCTL_HOST_CID", "2"))
+PORT = int(os.environ.get("LLMCTL_PORT", "21000"))
+
+
+def main(argv):
+    if not argv or argv[0] not in ("status", "models", "restart", "use") or \
+            len(argv) != (2 if argv[0] == "use" else 1):
+        sys.exit(__doc__.strip())
+    with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as s:
+        s.settimeout(120)
+        s.connect((HOST_CID, PORT))
+        s.sendall((" ".join(argv) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            b = s.recv(65536)
+            if not b:
+                break
+            buf += b
+    if not buf:
+        sys.exit("llmctl: no answer (is this guest's CID allowed on the host? llm allow CID)")
+    reply = json.loads(buf)
+    print(json.dumps(reply, indent=2))
+    sys.exit(0 if reply.get("ok") else 1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
