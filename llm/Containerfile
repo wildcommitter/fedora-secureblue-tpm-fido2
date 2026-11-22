@@ -1,0 +1,68 @@
+# llm-server: llama.cpp's OpenAI-compatible server for the host GPU (Vulkan, Mesa RADV),
+# run by rootless podman as the `llm` user (llm/README.md). Built from a pinned source
+# tag, not from upstream's container images (no GitHub artifacts), and reproducibly
+# like the OS image: digests, rpms.lock per stage, RUN without network except the one
+# pinned clone, SOURCE_DATE_EPOCH. Built by llm/build.sh into an OCI archive.
+ARG FEDORA_VERSION=44
+# Same pin as image/Containerfile (repro-lint checks they match).
+ARG FEDORA_DIGEST=sha256:3988086adef2975a8a3a6c15634e21625efebc6ac043c83f02f619efff6c5d11
+ARG RUN_NETWORK=none
+
+# Stage 1: llama-server, static ggml, Vulkan backend only. GGML_NATIVE=OFF so the
+# binary doesn't depend on the build machine's CPU; the GPU does the work, and the
+# CPU flags match any Zen 2+ host. No web UI (its prebuilt copy would be a download at
+# configure time) and no HTTPS client: guests use the API. The shallow clone can't
+# count commits, so the build number and commit come from the pins.
+FROM quay.io/fedora/fedora:${FEDORA_VERSION}@${FEDORA_DIGEST} AS llm-build
+ARG SOURCE_DATE_EPOCH
+ARG DNF_VAR_rpmlock=llm-build
+ARG RUN_NETWORK
+ARG LLAMACPP_REPO=https://github.com/ggml-org/llama.cpp
+ARG LLAMACPP_REF=b12634
+ARG LLAMACPP_COMMIT=42f6a58fd1bfd475d9f09ea3bf7ef671c059eaf2
+RUN --network=${RUN_NETWORK} --mount=type=tmpfs,target=/var \
+    dnf -y install --setopt=install_weak_deps=False cmake ninja-build gcc-c++ git-core \
+        vulkan-headers vulkan-loader-devel glslc spirv-headers-devel
+# The one fetch: the pinned tag, checked against its commit.
+RUN git clone --depth 1 --branch "${LLAMACPP_REF}" "${LLAMACPP_REPO}" /src \
+ && test "$(git -C /src rev-parse HEAD)" = "${LLAMACPP_COMMIT}"
+RUN --network=${RUN_NETWORK} cmake -S /src -B /build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_IS_DEV=OFF \
+        -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_OPENSSL=OFF \
+        -DLLAMA_BUILD_NUMBER="${LLAMACPP_REF#b}" -DLLAMA_BUILD_COMMIT="${LLAMACPP_COMMIT:0:8}" \
+        "-DCMAKE_C_FLAGS=-ffile-prefix-map=/src=. -ffile-prefix-map=/build=." \
+        "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=/src=. -ffile-prefix-map=/build=." \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,--build-id=none \
+ && cmake --build /build --target llama-server \
+ && install -D -m 0755 -s /build/bin/llama-server /out/llama-server \
+ && /out/llama-server --version 2>&1 | grep -q "${LLAMACPP_REF#b}"
+
+# Stage 2: the runtime tree, installed into /rootfs from the frozen repo; nothing of
+# dnf, rpm or a shell goes into the image. dnf-settle (image/files) folds the rpmdb's
+# write-ahead log in, so the tree is reproducible.
+FROM quay.io/fedora/fedora:${FEDORA_VERSION}@${FEDORA_DIGEST} AS llm-server
+ARG SOURCE_DATE_EPOCH
+ARG DNF_VAR_rpmlock=llm-server
+ARG RUN_NETWORK
+ARG FEDORA_VERSION
+# python3 runs dnf-settle in this builder; it doesn't go into /rootfs.
+RUN --network=${RUN_NETWORK} --mount=type=tmpfs,target=/var \
+    --mount=type=bind,from=imagefiles,source=usr/libexec/scroll-secure/dnf-settle,target=/tmp/dnf-settle \
+    dnf -y install --setopt=install_weak_deps=False python3 \
+ && dnf -y --installroot=/rootfs --use-host-config --releasever="${FEDORA_VERSION}" \
+        --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+        install vulkan-loader mesa-vulkan-drivers libgomp libstdc++ \
+ && /tmp/dnf-settle /rootfs \
+ && rm -rf /rootfs/var/cache/* /rootfs/var/log/* /rootfs/var/lib/dnf
+
+# Stage 3: the image. Runs as an unprivileged user in the container, which rootless
+# podman maps to a subordinate uid of `llm` on the host.
+FROM scratch
+COPY --from=llm-server /rootfs/ /
+COPY --from=llm-build /out/llama-server /usr/bin/llama-server
+USER 65534:65534
+EXPOSE 8080
+ENTRYPOINT ["/usr/bin/llama-server"]
+CMD ["--host", "0.0.0.0", "--port", "8080", "-m", "/models/model.gguf", "-ngl", "999"]

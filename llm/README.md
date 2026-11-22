@@ -1,8 +1,14 @@
 # llm: a local model server on the host GPU, for the guests
 
-**Status: design agreed, nothing implemented yet.** The only part exercised is one smoke
-run on this workstation's current OS (CachyOS, not the sealed image), see
+**Status: step 1 of the [plan](#plan) is built**: the server image, from source,
+reproducible (`llm/Containerfile`, `llm/build.sh`). Not done yet: the host units,
+`llmctl`, the vmswitch network and the installer payload. Everything was run on this
+workstation's current OS (CachyOS), not on the sealed image, see
 [What was verified](#what-was-verified).
+
+```sh
+llm/build.sh [tag]     # -> llm/out/llm-server.oci.tar; repro-lint, rpms.lock, no network but the pinned clone
+```
 
 ## Decisions (2026-11-22)
 
@@ -34,9 +40,18 @@ On 2026-11-22, on this workstation (CachyOS kernel 7.3.4, rootless podman 6.2.0)
 | Speed | Generation 24.1 tokens/s, prompt 96.7 tokens/s (61-token prompt, 152 tokens out) |
 | VRAM | 22.1 GiB in use while serving at 16k context (desktop included) |
 
+The image built from source (`llm/build.sh`, llama.cpp `b12634` = `42f6a58f`, Vulkan only):
+
+| Item | Result |
+|---|---|
+| Size | 436 MB: Fedora 44 runtime tree from `rpms.lock` (stages `llm-build`, `llm-server`), no shell, no dnf/rpm, uid 65534 |
+| Reproducible | Two `NO_CACHE=1` builds: the same image ID (`8e157b12…`) and the same `llm-server.oci.tar` (sha256 `f32bd5d8…`) |
+| Run | `--read-only --cap-drop all --security-opt no-new-privileges`, render node only: all layers on Vulkan0 |
+| Speed | Generation 23.9 tokens/s, prompt 99.0 tokens/s (the same prompt): on par with upstream's image |
+| Not built | The web UI (upstream fetches a prebuilt copy at configure time) and HTTPS client support. Guests use the API |
+
 **Not verified:**
-- the sealed secureblue image: its SELinux policy, user-namespace settings and podman configuration
-- llama.cpp built from source
+- the sealed secureblue image: its SELinux policy, user-namespace settings and podman configuration (the run above used `label=disable`)
 - ROCm
 - guests reaching the endpoint
 - anything about the installer
@@ -143,7 +158,7 @@ Decided: the USB image with a payload partition.
 | `LLM_CTX` | `16384` | 22.1 GiB measured at 16k. 32 GiB of VRAM leaves room for more |
 | `LLM_SLOTS` | `4` | Parallel requests (llama-server `-np`) |
 | `LLM_ADDR` | `10.89.255.1:8080` | The only listen address |
-| `LLMCPP_REF` | a pinned release tag | Bumped by script, never `latest` at build time |
+| `LLAMACPP_REF`, `LLAMACPP_COMMIT` | `b12634`, `42f6a58f…` | Build ARGs in `llm/Containerfile`. The clone must match the commit. Bump both together, never `latest` at build time |
 
 ## Rules this touches
 
@@ -155,9 +170,10 @@ Decided: the USB image with a payload partition.
 | No GitHub artifacts, reproducible build | Kept by building llama.cpp from a pinned source tag in a locked stage |
 | Secrets never enter the repo | API key generated at install. The model is never in the repo or a published artifact |
 
-## Plan once decided
+## Plan
 
-1. `llm/` stage: llama.cpp from source (Vulkan), repro-lint premises and `rpms.lock` entries.
+1. **Done:** `llm/` stage: llama.cpp from source (Vulkan), repro-lint premises (P1, P5, P7, P8 cover `llm/`)
+   and `rpms.lock` entries (`rpmlock.py update --only llm-build,llm-server` leaves the other stages alone).
 2. Quadlet unit, `llm` system user, tmpfiles for `/var/lib/llm`, `llm` CLI (`status`, `import`, `key`),
    and `llmctl-host` (vsock, CID allowlist) with the guest `llmctl` clients.
 3. vmswitch: the `llm` network (option A), with an e2e in a container netns like `vmswitch-e2e.sh`.

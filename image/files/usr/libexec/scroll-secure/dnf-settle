@@ -10,13 +10,16 @@ database header): SQLite then removes both files, and a reader of the read-only 
 (chunkah, `rpm -q` on the booted system) needs none. A WAL database without -shm can't be
 opened read-only. Run in the same RUN as dnf or rpm, so the layer never holds them. See
 image/REPRODUCIBLE.md.
+
+  dnf-settle [ROOT]     # default /; ROOT for a dnf --installroot tree
 """
 import os
 import sqlite3
 import sys
 
-for db in ("/usr/lib/sysimage/libdnf5/transaction_history.sqlite",
-           "/usr/lib/sysimage/rpm/rpmdb.sqlite"):
+root = sys.argv[1] if len(sys.argv) > 1 else "/"   # an --installroot tree (llm/Containerfile)
+for db in (os.path.join(root, "usr/lib/sysimage/libdnf5/transaction_history.sqlite"),
+           os.path.join(root, "usr/lib/sysimage/rpm/rpmdb.sqlite")):
     if not os.path.exists(db):
         continue
     con = sqlite3.connect(db)

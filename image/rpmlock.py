@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """rpmlock: every RPM the image build installs, pinned by sha256 (reproducible builds).
 
-  python3 -I rpmlock.py update [--prefix P]   resolve from the live repos, rewrite rpms.lock
+  python3 -I rpmlock.py update [--prefix P] [--only S1,S2]
+                                              resolve from the live repos, rewrite rpms.lock
+                                              (--only: just these stages; the other lines stay)
   python3 -I rpmlock.py fetch [DIR]           download rpms.lock into DIR (verified), make
                                               the repo build.sh mounts; prints DIR
 
@@ -56,13 +58,19 @@ def images():
     }
 
 
-def rpms(image):
-    out = run("podman", "run", "--rm", "--entrypoint", "rpm", image, "-qa", "--qf", QF,
+def rpms(image, root=None):
+    """The image's packages; with root, those of a dnf --installroot tree inside it."""
+    q = ["--root", root] if root else []
+    out = run("podman", "run", "--rm", "--entrypoint", "rpm", image, *q, "-qa", "--qf", QF,
               capture_output=True).stdout
     return {f[0]: f for f in (l.split("\t") for l in out.splitlines()) if not f[0].startswith("gpg-pubkey-")}
 
 
-def build_stages(prefix, keydir):
+# Stages that install a tree with dnf --installroot: their packages are read from there too.
+ROOTS = {"llm-server": "/rootfs"}
+
+
+def build_stages(prefix, keydir, only=None):
     """Build every dnf stage against the live repos; [(stage, its image, its base image)]."""
     img, release = images(), arg("FEDORA_VERSION")
     sign = ["--secret", f"id=secureboot_key,src={keydir}/k", "--secret", f"id=secureboot_crt,src={keydir}/c",
@@ -85,10 +93,21 @@ def build_stages(prefix, keydir):
           "--target", "rootfs-base"], "rootfs-base", t("rootfs")),
         (["-f", "uki/Containerfile.uki", *uki, "--build-arg", "BASE=scratch", "--build-arg", "KERNEL=scratch",
           "--target", "uki-tools"], "uki-tools", img["minimal"]),
+        # llm/: the model server image (llm/README.md), its own build context.
+        (["-f", "../llm/Containerfile", "--build-arg", "RUN_NETWORK=host", "--build-context", "imagefiles=files",
+          "--target", "llm-build"], "llm-build", img["fedora"]),
+        (["-f", "../llm/Containerfile", "--build-arg", "RUN_NETWORK=host", "--build-context", "imagefiles=files",
+          "--target", "llm-server"], "llm-server", img["fedora"]),
     ]
+    if only:
+        unknown = only - {s for _, s, _ in steps}
+        if unknown:
+            die(f"--only: unknown stages {' '.join(sorted(unknown))}")
+        steps = [st for st in steps if st[1] in only]
     out = []
     for opts, stage, base in steps:
-        run("podman", "build", "--pull=missing", "-t", t(stage), *opts, ".", cwd=HERE)
+        ctxdir = "../llm" if "../llm/Containerfile" in opts else "."
+        run("podman", "build", "--pull=missing", "-t", t(stage), *opts, ctxdir, cwd=HERE)
         if base:
             out.append((stage, t(stage), base))
     return out
@@ -137,19 +156,22 @@ def hash_all(urls):
         return dict(zip(urls, ex.map(sha256_url, urls.values())))
 
 
-def update(prefix):
+def update(prefix, only=None):
     with tempfile.TemporaryDirectory() as keydir:
         # Throwaway key: the signing steps run, but only the RPMs matter here.
         run("openssl", "req", "-quiet", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=rpmlock",
             "-days", "1", "-keyout", f"{keydir}/k", "-out", f"{keydir}/c", capture_output=True)
-        stages = build_stages(prefix, keydir)
+        stages = build_stages(prefix, keydir, only)
     # Per stage: what it added to its base. Each stage gets only its own set at build
     # time: stages resolved at different times can hold different versions of a package.
     per_stage, urls, other = {}, {}, {}
     for stage, image, base in stages:
         have, before = rpms(image), rpms(base)
+        added = {n: f for n, f in have.items() if n not in before}
+        if stage in ROOTS:   # an installroot tree starts empty: all of it comes from the lock
+            added.update(rpms(image, ROOTS[stage]))
         per_stage[stage] = []
-        for nevra, srpm, vendor, sig in (f for n, f in have.items() if n not in before and f[1] != "(none)"):
+        for nevra, srpm, vendor, sig in (f for f in added.values() if f[1] != "(none)"):
             per_stage[stage].append(nevra)
             url = koji_url(nevra, srpm, sig) if vendor == "Fedora Project" else None
             if url:
@@ -177,13 +199,22 @@ def update(prefix):
             die(f"not an RPM: {' '.join(bad)}")
         urls.update({n: locs[n] for n in nevras})
         sums.update(got)
+    # --only: the other stages keep their lines, in the lock's stage order.
+    kept = [l for l in read_lock() if l[2] not in per_stage] if only else []
+    order = list(dict.fromkeys([l[2] for l in read_lock()] if only else []))
+    order += [st for st, _, _ in stages if st not in order]
     with open(LOCK, "w") as f:
         f.write("# Every RPM the image build installs, per build stage: sha256, where to get it,\n"
                 "# stage. Written by `python3 -I rpmlock.py update`; build.sh gives each stage a\n"
                 "# repo of its own lines only.\n")
-        for stage, _, _ in stages:
-            for nevra in sorted(per_stage[stage]):
-                f.write(f"{sums[nevra]}  {urls[nevra]}  {stage}\n")
+        for stage in order:
+            if stage in per_stage:
+                for nevra in sorted(per_stage[stage]):
+                    f.write(f"{sums[nevra]}  {urls[nevra]}  {stage}\n")
+            else:
+                for sha, url, st in kept:
+                    if st == stage:
+                        f.write(f"{sha}  {url}  {st}\n")
     n = sum(map(len, per_stage.values()))
     print(f"rpmlock: wrote {LOCK} ({len(urls)} RPMs, {n} in {len(stages)} stages)", file=sys.stderr)
 
@@ -249,12 +280,13 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     u = sub.add_parser("update")
     u.add_argument("--prefix", default="localhost/scroll-secure")
+    u.add_argument("--only", default="", help="comma-separated stages to re-resolve")
     f = sub.add_parser("fetch")
     f.add_argument("dir", nargs="?", default=os.environ.get(
         "RPMLOCK_CACHE", os.path.expanduser("~/.cache/scroll-secure/rpms")))
     a = ap.parse_args()
     if a.cmd == "update":
-        update(a.prefix)
+        update(a.prefix, set(filter(None, a.only.split(","))) or None)
     else:
         fetch(os.path.abspath(a.dir))
 

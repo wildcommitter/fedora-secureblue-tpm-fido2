@@ -34,6 +34,7 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 | `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`, or to `vmgui-wire` for `PROTO=wire` guests), `guest/` (the topology: `linux/` rpm+deb × wlroots/xorg, `agent/` Go vmgui-agent for win11/macos, `build.sh`), `PROTOCOL.md` (wire protocol), `test/` |
 | `vmswitch/` | Guests' network switch: TAPs + one nftables table (`netdev`: dup to peers; `inet`: routed `uplink`), USB to guests (usbguard + libvirt hostdev), `vmtui` (curses tree table), `usbguard-firstboot` |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
+| `llm/` | Model server image (llama.cpp from a pinned tag, Vulkan) for the host GPU; design and status in `llm/README.md` |
 | `test/bootc/` | tokenvault e2e, Secure Boot enrollment e2e and the duress reset e2e on the sealed image |
 
 ## Hard rules
@@ -133,6 +134,7 @@ vmswitch/test/vmswitch-e2e.sh                          # switch + uplink: TAPs a
 vmswitch/test/vmswitch-usb-e2e.sh                      # USB attach logic, stub usbguard/virsh
 vmswitch/test/vmtui-e2e.sh                             # the TUI in a pty against the real switch
 image/repro-lint-test.sh                               # repro-lint catches each broken premise (mutations)
+llm/build.sh                                           # llm-server image -> llm/out/llm-server.oci.tar (reproducible)
 ```
 
 Work directories (`**/work/`) hold multi-GB disks and are git-ignored.

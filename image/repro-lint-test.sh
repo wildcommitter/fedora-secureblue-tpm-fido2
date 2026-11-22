@@ -15,6 +15,7 @@ mutate() {
     mkdir -p "${t}/image"
     cp -a "${here}/." "${t}/image/"
     mkdir -p "${t}/lockscreen" && cp "${here}/../lockscreen/go.sum" "${t}/lockscreen/"
+    mkdir -p "${t}/llm" && cp "${here}/../llm/Containerfile" "${here}/../llm/build.sh" "${t}/llm/"
     python3 -I - "${t}/image/$2" "$3" <<'PY'
 import sys
 p, expr = sys.argv[1:]
@@ -58,4 +59,12 @@ mutate P9 uki/Containerfile.base 's.replace(" \\\n && /usr/libexec/scroll-secure
 mutate P9 uki/Containerfile.base 's.replace("remove-kernel-initrd.sh \\\n && /usr/libexec/scroll-secure/dnf-settle", "remove-kernel-initrd.sh")'
 mutate P10 Containerfile 's.replace("%use_source_date_epoch_as_buildtime 1", "%_smp_build_ncpus 4")'
 mutate P10 Containerfile 's.replace("> ~/.rpmmacros", "> /tmp/rpmmacros")'
+# llm/ (the model server image)
+mutate P1 ../llm/Containerfile 's.replace("@${FEDORA_DIGEST} AS llm-build", " AS llm-build")'
+mutate P1 ../llm/Containerfile 's.replace("ARG FEDORA_DIGEST=sha256:3", "ARG FEDORA_DIGEST=sha256:4")'
+mutate P2 ../llm/Containerfile 's.replace("ARG DNF_VAR_rpmlock=llm-server\n", "")'
+mutate P5 ../llm/build.sh 's.replace(" --rewrite-timestamp\n", "\n")'
+mutate P7 ../llm/Containerfile 's.replace(" && test \"$(git -C /src rev-parse HEAD)\" = \"${LLAMACPP_COMMIT}\"", "")'
+mutate P8 ../llm/Containerfile 's.replace("RUN --network=${RUN_NETWORK} cmake", "RUN cmake")'
+mutate P8 ../llm/build.sh 's.replace("podman build \"${repro[@]}\"", "podman build --build-arg RUN_NETWORK=host \"${repro[@]}\"")'
 echo "repro-lint-test: ${pass} mutations caught, real files pass"

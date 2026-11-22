@@ -10,18 +10,19 @@ premise and the ways we know a stage can stop being deterministic. It reads the 
 files only; build.sh runs it before building.
 
   P1  every FROM is a digest (@sha256:...), an earlier stage, scratch, oci:out, or an
-      image build.sh itself built (an ARG it passes)
+      image build.sh itself built (an ARG it passes); llm/ uses the image's Fedora pin
   P2  every stage that runs dnf (directly or through uki/scripts) names its lines of
       rpms.lock (ARG DNF_VAR_rpmlock=<stage>), and that stage has lines in the lock
   P3  every stage with a RUN declares ARG SOURCE_DATE_EPOCH
   P4  rpms.lock: each line is a sha256, an https URL and a known stage
-  P5  build.sh passes --source-date-epoch and --rewrite-timestamp to every podman build
-      and mounts the lock over /etc/yum.repos.d
+  P5  build.sh and llm/build.sh pass --source-date-epoch and --rewrite-timestamp to every
+      podman build and mount the lock over /etc/yum.repos.d
   P6  signing uses systemd-sbsign only (sbsign puts the clock into signingTime), and a
       ukify build with a kernel says whether to sign it (systemd-sbsign can't check)
-  P7  network inputs outside dnf are pinned: the scroll clone checks its commit, Go
-      modules are read-only against go.sum
-  P8  isolation: no RUN step has the network except those two fetches (Containerfile:
+  P7  network inputs outside dnf are pinned: the scroll and llama.cpp clones check their
+      commits, Go modules are read-only against go.sum
+  P8  isolation: no RUN step has the network except those fetches (Containerfile and
+      llm/Containerfile:
       RUN --network=${RUN_NETWORK}, default none; build.sh: uki/ builds --network=none),
       so a stage reads only its declared inputs
   P9  every dnf step in a stage whose files ship (the image stage, rootfs-base) runs
@@ -37,7 +38,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = ["Containerfile", "uki/Containerfile.kernel", "uki/Containerfile.systemd-boot",
-         "uki/Containerfile.addons", "uki/Containerfile.base", "uki/Containerfile.chunked", "uki/Containerfile.uki"]
+         "uki/Containerfile.addons", "uki/Containerfile.base", "uki/Containerfile.chunked", "uki/Containerfile.uki",
+         "../llm/Containerfile"]
 # ARGs build.sh sets to images it built itself (BUILD_PREFIX), or that resolve to "scratch"
 BUILT = {"BASE", "KERNEL", "SYSTEMDBOOT", "UKIADDONS"}
 DNF = re.compile(r"\bdnf5?\s+(-\S+\s+)*(install|upgrade|builddep|reinstall|downgrade|swap|distro-sync)\b")
@@ -145,6 +147,12 @@ def check_containerfiles(locked):
                     fail(f"P2 {where}: DNF_VAR_rpmlock={st} has no lines in rpms.lock")
             if re.search(r"(^|[\s/])sbsign\s", text):
                 fail(f"P6 {where}: sbsign (use systemd-sbsign)")
+    # llm/ builds on the same Fedora pin as the image (one base to bump).
+    img_g, _ = stages("Containerfile")
+    llm_g, _ = stages("../llm/Containerfile")
+    for k in ("FEDORA_VERSION", "FEDORA_DIGEST"):
+        if llm_g.get(k) != img_g.get(k):
+            fail(f"P1 ../llm/Containerfile: ARG {k}={llm_g.get(k)} differs from Containerfile's {img_g.get(k)}")
     for name in os.listdir(os.path.join(HERE, "uki/scripts")):
         t = read(f"uki/scripts/{name}")
         if re.search(r"--signtool\s+sbsign\b|(^|\s)sbsign\s", t):
@@ -156,15 +164,20 @@ def check_containerfiles(locked):
 
 
 def check_build_sh():
-    s = read("build.sh")
+    for path in ("build.sh", "../llm/build.sh"):
+        check_one_build_sh(path)
+
+
+def check_one_build_sh(path):
+    s = read(path)
     flat = re.sub(r"\\\n", " ", s)
     if not re.search(r'repro=\([^)]*--source-date-epoch "\$\{sde\}" --rewrite-timestamp', flat, re.S):
-        fail("P5 build.sh: repro=(...) lacks --source-date-epoch \"${sde}\" --rewrite-timestamp")
+        fail(f"P5 {path}: repro=(...) lacks --source-date-epoch \"${{sde}}\" --rewrite-timestamp")
     if not re.search(r'repro=\([^)]*:/etc/yum\.repos\.d:ro', flat, re.S):
-        fail("P5 build.sh: repro=(...) doesn't mount the lock over /etc/yum.repos.d")
+        fail(f"P5 {path}: repro=(...) doesn't mount the lock over /etc/yum.repos.d")
     for m in re.finditer(r"^\s*podman build\b.*$", flat, re.M):
         if '"${repro[@]}"' not in m.group(0):
-            fail(f"P5 build.sh: podman build without \"${{repro[@]}}\": {m.group(0).strip()[:90]}")
+            fail(f"P5 {path}: podman build without \"${{repro[@]}}\": {m.group(0).strip()[:90]}")
 
 
 def check_network():
@@ -177,27 +190,35 @@ def check_network():
             fail(f"P7 Containerfile: go build without GOFLAGS=-mod=readonly: {m.group(0)[:60]}")
     if not os.path.exists(os.path.join(HERE, "../lockscreen/go.sum")):
         fail("P7 lockscreen/go.sum missing")
+    lc = read("../llm/Containerfile")
+    if not re.search(r'git -C /src rev-parse HEAD\)" = "\$\{LLAMACPP_COMMIT\}"', lc) or \
+            not re.search(r"ARG LLAMACPP_COMMIT=[0-9a-f]{40}\n", lc):
+        fail("P7 llm/Containerfile: the llama.cpp clone doesn't check a pinned 40-hex LLAMACPP_COMMIT")
     for f in FILES:
         for m in re.finditer(r"\b(curl|wget|git clone|pip install|go install)\b[^\n]*", read(f)):
-            if "git clone" in m.group(0) and "SCROLL_REPO" in m.group(0):
+            if "git clone" in m.group(0) and ("SCROLL_REPO" in m.group(0) or
+                                              (f == "../llm/Containerfile" and "LLAMACPP_REPO" in m.group(0))):
                 continue
             fail(f"P7 {f}: unpinned network fetch: {m.group(0)[:70]}")
 
 
 def check_isolation():
-    glob, sts = stages("Containerfile")
-    if glob.get("RUN_NETWORK") != "none":
-        fail("P8 Containerfile: no global ARG RUN_NETWORK=none")
-    for n, ref, alias, body, args in sts:
-        runs = [l for l in body if l.startswith("RUN")]
-        fetch = [l for l in runs if "git clone" in l or "go build" in l]
-        for l in runs:
-            if l in fetch:
-                continue
-            if not l.startswith("RUN --network=${RUN_NETWORK} "):
-                fail(f"P8 Containerfile stage {alias or ref}: RUN with network: {l[:70]}")
-        if len(runs) > len(fetch) and "RUN_NETWORK" not in args:
-            fail(f"P8 Containerfile stage {alias or ref}: no ARG RUN_NETWORK")
+    for path in ("Containerfile", "../llm/Containerfile"):
+        glob, sts = stages(path)
+        if glob.get("RUN_NETWORK") != "none":
+            fail(f"P8 {path}: no global ARG RUN_NETWORK=none")
+        for n, ref, alias, body, args in sts:
+            runs = [l for l in body if l.startswith("RUN")]
+            fetch = [l for l in runs if "git clone" in l or "go build" in l]
+            for l in runs:
+                if l in fetch:
+                    continue
+                if not l.startswith("RUN --network=${RUN_NETWORK} "):
+                    fail(f"P8 {path} stage {alias or ref}: RUN with network: {l[:70]}")
+            if len(runs) > len(fetch) and "RUN_NETWORK" not in args:
+                fail(f"P8 {path} stage {alias or ref}: no ARG RUN_NETWORK")
+    if "RUN_NETWORK" in read("../llm/build.sh"):
+        fail("P8 llm/build.sh: sets RUN_NETWORK (only rpmlock.py update may)")
     s = re.sub(r"\\\n", " ", read("build.sh"))
     if "offline=(--network=none)" not in s:
         fail("P8 build.sh: no offline=(--network=none)")
