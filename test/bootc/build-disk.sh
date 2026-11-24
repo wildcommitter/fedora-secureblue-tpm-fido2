@@ -8,6 +8,10 @@
 # DEV-key-signed serial-console UKI addon from lab-secureboot.sh on the ESP.
 #
 #   sudo test/bootc/build-disk.sh <workdir> <image in the invoking user's podman storage>
+#
+# Optional, lab only: LAB_USER=<name> LAB_USER_HASH=<crypt(3) hash>
+# [LAB_USER_GROUPS=a,b] adds a first-boot unit that creates that local user
+# (a desktop account for SDDM) on this lab disk only.
 set -euo pipefail
 
 W=$(readlink -f "${1:?workdir}")
@@ -121,10 +125,35 @@ if [[ -f $ADDON ]]; then
     install -D -m 0600 "$ADDON" "$MNT/boot/loader/addons/lab-serial-console.addon.efi"
 fi
 
+if [[ -n ${LAB_USER:-} ]]; then
+    [[ $LAB_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "bad LAB_USER: $LAB_USER" >&2; exit 1; }
+    [[ ${LAB_USER_HASH:-} =~ ^\$[0-9a-z]+\$[./0-9A-Za-z$]+$ ]] || { echo "LAB_USER_HASH must be a crypt(3) hash" >&2; exit 1; }
+    [[ ${LAB_USER_GROUPS:-} =~ ^[a-z0-9_,-]*$ ]] || { echo "bad LAB_USER_GROUPS" >&2; exit 1; }
+    # systemd expands $ in ExecStart: double it.
+    cat > "$etc_dir/systemd/system/lab-user.service" <<EOF
+[Unit]
+Description=Lab only: create the lab desktop user $LAB_USER
+ConditionPathExists=!/var/lib/lab-user.done
+After=local-fs.target
+Before=systemd-user-sessions.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=useradd -m ${LAB_USER_GROUPS:+-G $LAB_USER_GROUPS }-p ${LAB_USER_HASH//\$/\$\$} $LAB_USER
+ExecStart=touch /var/lib/lab-user.done
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    mkdir -p "$etc_dir/systemd/system/multi-user.target.wants"
+    ln -sf /etc/systemd/system/lab-user.service "$etc_dir/systemd/system/multi-user.target.wants/lab-user.service"
+fi
+
 cat > "$W/guest.env" <<EOF
 GUEST_LUKS_UUID=$UUID
 GUEST_TARGET_NAME=root
 LAB_RECOVERY=$LAB_RECOVERY
+LAB_USER=${LAB_USER:-}
 EOF
 cleanup
 trap - EXIT
