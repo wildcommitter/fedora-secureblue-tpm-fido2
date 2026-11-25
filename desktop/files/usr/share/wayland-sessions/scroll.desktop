@@ -1,0 +1,9 @@
+# scroll-secure: our session entry (scroll-secure-desktop RPM; the stock one from the
+# scroll RPM is not installed, see image/Containerfile). The session reads only
+# /etc/scroll/config, not ~/.config/scroll/config.
+[Desktop Entry]
+Name=Scroll
+Comment=An i3-compatible Wayland compositor (sway) with a PaperWM layout
+Exec=scroll -c /etc/scroll/config
+Type=Application
+DesktopNames=scroll;wlroots

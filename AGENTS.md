@@ -30,7 +30,8 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 |---|---|
 | `image/Containerfile`, `image/build.sh`, `image/files/`, `image/uki/` | Image build, signing pipeline (vendored from secureblue, see `uki/VENDORED`), install, Secure Boot keys (`uki/secure-boot-keys.sh`) |
 | `image/files-luks/`, `image/LUKS.md` | tokenvault: dracut module + generator (initrd), `tokenvault` CLI, SELinux CIL (`tokenvault_conf_t`), tmpfiles |
-| `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in |
+| `desktop/` | The `scroll-secure-desktop` RPM (spec, `files/`, `keys-wallpaper.py`) and the mock build of it and scroll (`mock-cfg.sh`, `make-srpm.sh`, `build.sh`); the image installs both from stage `rpm-build` |
+| `lockscreen/` | hardened-unlock (Go, GTK4, `gtk4-layer-shell` session lock), PAM file, scroll config drop-in; packaged in `scroll-secure-desktop` |
 | `vmgui/` | Qubes-style VM windows: `host/` (`vmgui` CLI, `vmgui-host`: security context `scroll-vm` + CID-checked vsock relay to a confined `waypipe client`, or to `vmgui-wire` for `PROTO=wire` guests), `guest/` (the topology: `linux/` rpm+deb × wlroots/xorg, `agent/` Go vmgui-agent for win11/macos, `build.sh`), `PROTOCOL.md` (wire protocol), `test/` |
 | `vmswitch/` | Guests' network switch: TAPs + one nftables table (`netdev`: dup to peers; `inet`: routed `uplink`), USB to guests (usbguard + libvirt hostdev), `vmtui` (curses tree table), `usbguard-firstboot` |
 | `test/e2e.py`, `test/vfido/` | Shared KVM harness (`Lab`, `Serial`) and the virtual CTAP2 key (USB HID gadget on `dummy_hcd`) |
@@ -81,13 +82,14 @@ A sealed, signed secureblue (Fedora Atomic, Sericea + scroll) image for one work
 ```sh
 SECRETS_DIR=... image/build.sh [tag]      # full sealed build; needs uki/keys + db.key + PCR.key
 lockscreen/build.sh                       # Fedora 44 container -> lockscreen/out/; runs go vet + go test
+desktop/build.sh                          # scroll + scroll-secure-desktop RPMs with mock (stage rpm-build) -> desktop/out/
 image/uki/secure-boot-keys.sh create      # new key hierarchy (refuses to overwrite)
 python3 -I image/rpmlock.py update        # re-resolve rpms.lock against the live repos (any dnf change)
 ```
 
 The build is reproducible (`image/REPRODUCIBLE.md`): pinned digests, `rpms.lock` served
 per stage as the only repo, `RUN --network=none`, `SOURCE_DATE_EPOCH`, `systemd-sbsign`.
-`build.sh` runs `image/repro-lint.py` (P1–P10) first; keep it passing, and add a mutation to
+`build.sh` runs `image/repro-lint.py` (P1–P11) first; keep it passing, and add a mutation to
 `image/repro-lint-test.sh` for each new premise. Check with two builds:
 
 ```sh
@@ -98,16 +100,17 @@ python3 -I image/repro-diff.py localhost/a:uki localhost/b:uki                  
 The image build runs `bootc container lint --fatal-warnings` (in `uki/Containerfile.base`)
 and `/usr/libexec/tokenvault/check-uki` (from `image/files-luks/`) on the signed UKI. Both must pass.
 
-- **Dev builds use a scratch copy.** Put dev keys in a copy of `image/` (with `lockscreen/`
+- **Dev builds use a scratch copy.** Put dev keys in a copy of `image/` (with `lockscreen/` and `desktop/`
   next to it) and run `secure-boot-keys.sh create --keys <copy>/uki/keys --secrets <scratch>`
   there. Run without `--keys`, it writes into the tracked `image/uki/keys/`, and dev keys
   would be committed and embedded in the image.
 - **Key layout:** nested in the repo (`uki/keys/{PK,KEK,db,PCR}/`, plus `GUID`), but flat
   in the image (`/usr/share/secureblue/uki/keys/`, copied by `uki/Containerfile.base`).
   `secure-boot-keys.sh` accepts both.
-- **Building `image/Containerfile` by hand** needs `--build-context lockscreen=../lockscreen
+- **Building `image/Containerfile` by hand** needs `--cap-add=SYS_ADMIN` (mock, stage
+  `rpm-build`) and `--build-context lockscreen=../lockscreen --build-context desktop=../desktop
   --build-context vmgui=../vmgui --build-context vmswitch=../vmswitch --build-context llm=../llm`.
-  `build.sh` passes it.
+  `build.sh` passes them.
 - **`uki/` is vendored.** Our changes are marked `scroll-secure:`. Re-apply them when
   re-vendoring, and update `uki/VENDORED`.
 

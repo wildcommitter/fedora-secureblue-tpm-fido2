@@ -97,11 +97,11 @@ The rest follows from that:
 
 | Premise | How | Kind |
 |---|---|---|
-| A1, A2 | `repro-lint.py`, P1–P10, run by build.sh before every build; `repro-lint-test.sh` breaks each premise in a copy (29 mutations) and requires the matching failure | Checked from the files: a build that breaks them doesn't start |
+| A1, A2 | `repro-lint.py`, P1–P11, run by build.sh before every build; `repro-lint-test.sh` breaks each premise in a copy (49 mutations) and requires the matching failure | Checked from the files: a build that breaks them doesn't start |
 | A2, dnf | P2 + P5: the volume over `/etc/yum.repos.d`; a stage without `DNF_VAR_rpmlock` resolves no repo | Checked |
 | A2, network | P8: `RUN --network=none` except the scroll clone and `go build` (both pinned, A1); `uki/` builds run `--network=none` | Enforced by podman |
 | A3 | Not provable: gcc, Go, rpm, dracut, ukify and podman are outside this repo. Tested per tool (rpm, dnf, `systemd-sbsign` above) and as a whole by two independent `NO_CACHE=1` builds and `repro-diff.py` | Evidence, not proof |
-| A3, rpm, dnf | P9: `dnf-settle` after dnf in a shipped stage and last before chunkah; P10: `~/.rpmmacros` before rpmbuild | Checked that the known fixes are in place; that they suffice is tested, as A3 |
+| A3, rpm, dnf | P9: `dnf-settle` after dnf in a shipped stage and last before chunkah; P10: `~/.rpmmacros` before rpmbuild; P11: mock only with `desktop/mock-cfg.sh` (stage repos, no bootstrap image, no network, fixed macros, `SOURCE_DATE_EPOCH`) | Checked that the known fixes are in place; that they suffice is tested, as A3 |
 | A4 | Not checked. Use the same podman version (6.1.4 here) | Assumption |
 
 A difference that `repro-diff.py` finds means a premise is broken. It lists the layers and

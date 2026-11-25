@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Draw the desktop wallpaper: a key-binding cheatsheet on black.
 
-Runs at image build, after /etc/scroll/config and config.d are final. Every key
-on the sheet must be bound at the top level of that config (not inside a mode),
+Runs in the scroll-secure-desktop RPM build (desktop/scroll-secure-desktop.spec.in),
+from the config and config.d the RPM ships. Every key on the sheet must be bound at the top level of that config (not inside a mode),
 or the build fails, so the sheet can't drift from the real bindings.
 
-  python3 -I keys-wallpaper.py <config> <out.png>
+  python3 -I keys-wallpaper.py [--root DIR] <config> <out.png>
 
-Writes an SVG and renders it with ImageMagick (librsvg delegate), both in the image.
+--root: absolute `include` paths in the config are read under DIR (the RPM
+buildroot, where /etc/scroll/config.d/* is not installed yet).
+
+Writes an SVG and renders it with ImageMagick (librsvg delegate), both BuildRequires.
 """
 import glob
 import html
@@ -80,7 +83,7 @@ def die(msg):
     sys.exit(f"keys-wallpaper: {msg}")
 
 
-def read_config(path):
+def read_config(path, root=""):
     """Top-level bindsym combos and `set` variables, following config.d includes."""
     variables, binds, depth = {}, set(), 0
     files = [path]
@@ -97,7 +100,7 @@ def read_config(path):
                         variables[m.group(1)] = m.group(2)
                     m = re.match(r"include\s+(\S+)", line)
                     if m:
-                        files += sorted(glob.glob(m.group(1)))
+                        files += sorted(glob.glob(root + m.group(1)))
                     m = re.match(r"bindsym\s+((?:--[\w-]+\s+)*)(\S+)", line)
                     if m:
                         binds.add(norm(m.group(2), variables))
@@ -137,10 +140,13 @@ def svg(sections):
 
 
 def main():
-    if len(sys.argv) != 3:
-        die("usage: keys-wallpaper.py <config> <out.png>")
-    config, png = sys.argv[1:]
-    variables, binds = read_config(config)
+    args, root = sys.argv[1:], ""
+    if args[:1] == ["--root"] and len(args) >= 2:
+        root, args = args[1].rstrip("/"), args[2:]
+    if len(args) != 2:
+        die("usage: keys-wallpaper.py [--root DIR] <config> <out.png>")
+    config, png = args
+    variables, binds = read_config(config, root)
     missing = [c for _, rows in SHEET for _, _, combos in rows for c in combos
                if norm(c, variables) not in binds]
     if missing:

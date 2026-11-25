@@ -27,22 +27,23 @@ AMD R9700 on amdgpu.
 
 | Path | Purpose |
 |---|---|
-| `Containerfile` | Root filesystem: build scroll (static wlroots, Fedora hardening flags, see [scroll hardening](#scroll-hardening)) in `fedora:44`, then layer it onto the pinned secureblue image |
+| `Containerfile` | Root filesystem: build the desktop RPMs with mock in `fedora:44` (scroll: static wlroots, Fedora hardening flags, see [scroll hardening](#scroll-hardening); scroll-secure-desktop, see `../desktop/README.md`), then layer them onto the pinned secureblue image |
 | `build.sh` | Full sealed build: rootfs → kernel → signed systemd-boot → signed addons → base → signed UKI |
 | `uki/` | secureblue's sealed-UKI pipeline, plus `secure-boot-keys.sh`. `install.sh` is patched for our image and cosign key |
 | `uki/keys/` | Public keys only (PK/KEK/db certs, `.auth`, `.esl`, PCR.pem, GUID). Built into the image at `/usr/share/secureblue/uki/keys/` |
 | `uki/secure-boot-keys.sh` → `/usr/libexec/scroll-secure/secure-boot-keys` | `create` the keys (trusted machine), `enroll` them into the firmware with option ROM hashes, `status`. Use this, **not** `ujust enroll-secure-boot-keys` |
 | `files/etc/pam.d/swaylock` | Unlock = FIDO2 key + client PIN + touch, mapping file in `/etc` |
-| `../lockscreen/` (build context `lockscreen`) | hardened-unlock, a GTK4 ext-session-lock locker. Unlock = FIDO2 key + PIN + touch, **then** the account password. Bound to Mod+Alt+L, 5 min idle and suspend via `/etc/scroll/config.d/50-hardened-unlock.conf` |
+| `../desktop/` (build context `desktop`) | The `scroll-secure-desktop` RPM (built with mock, `desktop/build.sh` alone): our `/etc/scroll/config`, the session entries, SDDM's wrapper, the headless session, the cheatsheet wallpaper, and hardened-unlock from `../lockscreen` |
+| `../lockscreen/` (build context `lockscreen`, packaged in `scroll-secure-desktop`) | hardened-unlock, a GTK4 ext-session-lock locker. Unlock = FIDO2 key + PIN + touch, **then** the account password. Bound to Mod+Alt+L, 5 min idle and suspend via `/etc/scroll/config.d/50-hardened-unlock.conf` |
 | `../vmgui/` (build context `vmgui`) | Qubes-style VM windows: `vmgui` CLI and `vmgui-host` (see `vmgui/README.md`). Virtualization is the bare set that `files/usr/libexec/scroll-secure/check-virt` allows |
 | `../vmswitch/` (build context `vmswitch`) | Guest networks (TAP + nftables switch, `uplink`), USB to guests (usbguard, enabled with a first-boot policy), `vmtui` on Super N (see `vmswitch/README.md`) |
-| `files/usr/share/wayland-sessions/scroll-pixman.desktop` | SDDM session: scroll with `WLR_RENDERER=pixman`. Both scroll sessions read only `/etc/scroll/config` |
-| `files/usr/lib/sddm/sddm.conf.d/zz-scroll-secure.conf`, `files/usr/libexec/scroll-secure/wayland-session` | SDDM starts Wayland sessions with a fixed environment, without the user's shell startup files |
+| `../desktop/files/usr/share/wayland-sessions/` | SDDM sessions: `scroll.desktop`, and `scroll-pixman.desktop` with `WLR_RENDERER=pixman`. Both read only `/etc/scroll/config` |
+| `../desktop/files/usr/lib/sddm/sddm.conf.d/zz-scroll-secure.conf`, `../desktop/files/usr/libexec/scroll-secure/wayland-session` | SDDM starts Wayland sessions with a fixed environment, without the user's shell startup files |
 | `files/usr/libexec/scroll-secure/check-hardening` | Build check: PIE, full RELRO, stack protector, FORTIFY, CET on `/usr/bin/scroll` |
-| `files/usr/libexec/scroll-headless`, `files/etc/scroll/headless.conf` | Headless pixman session, wayvnc on the Unix socket `/run/user/<uid>/wayvnc.sock` |
-| `files/usr/lib/systemd/user/scroll-headless.service` | Starts it as a sandboxed user service (off by default) |
+| `../desktop/files/usr/libexec/scroll-headless`, `../desktop/files/etc/scroll/headless.conf` | Headless pixman session, wayvnc on the Unix socket `/run/user/<uid>/wayvnc.sock` |
+| `../desktop/files/usr/lib/systemd/user/scroll-headless.service` | Starts it as a sandboxed user service (off by default) |
 | `iso/build-iso.sh` | Installer ISO: Fedora CoreOS live ISO + embedded installer, db cert, cosign key, image ref |
-| `../.github/workflows/build.yml` | CI: build, sign, push, cosign, then the ISO as a release. Only runs with signing secrets |
+| `../.github/workflows/build.yml` | CI in stages: lint → desktop RPMs (mock) and vmgui guest packages → sealed image (signing secrets; checks that its RPMs are the published ones), push, cosign → ISO → one release with every RPM, guest package, the ISO and `SHA256SUMS`. Without signing secrets: RPMs and guest packages only. Pull requests: lint, RPMs, guest packages |
 | `files-luks/**`, `LUKS.md` | tokenvault: TPM2+PIN, then FIDO2+PIN+touch, unlocks root. The initramfs is built in `uki/Containerfile.uki` |
 
 ## Who signs what
@@ -258,10 +259,11 @@ UKI. Rollback is available from the systemd-boot menu (3 s timeout).
 ## Checks in the build
 
 - The rootfs fails if scroll or hardened-unlock misses a library, `/usr/bin/scroll` lacks
-  a hardening property (`check-hardening`), our scroll config (`files/etc/scroll/config`)
+  a hardening property (`check-hardening`), our scroll config (`../desktop/files/etc/scroll/config`)
   isn't installed or doesn't load cleanly (`scroll -C`: an error, or a key bound twice),
   the session file doesn't pin `-c /etc/scroll/config`, a key on the cheatsheet isn't
-  bound, or a tokenvault CLI dependency is missing.
+  bound (`scroll-secure-desktop`'s build), `rpm -V` of scroll or scroll-secure-desktop fails,
+  or a tokenvault CLI dependency is missing.
 - `uki/Containerfile.base` runs `bootc container lint --fatal-warnings`.
 - The scroll RPM's `%check` fails without the hardening flags. The rootfs checks that
   `rpm -q scroll` is the `.hardened` build and that `scroll -v` says `packaged`.

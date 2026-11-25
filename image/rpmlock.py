@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +59,11 @@ def images():
     }
 
 
+def commit_time():
+    out = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=HERE, capture_output=True, text=True).stdout.strip()
+    return out if out.isdigit() else "0"
+
+
 def rpms(image, root=None):
     """The image's packages; with root, those of a dnf --installroot tree inside it."""
     q = ["--root", root] if root else []
@@ -67,7 +73,8 @@ def rpms(image, root=None):
 
 
 # Stages that install a tree with dnf --installroot: their packages are read from there too.
-ROOTS = {"llm-server": "/rootfs"}
+# rpm-build: mock's chroot (desktop/mock-cfg.sh, kept by --no-cleanup-after).
+ROOTS = {"llm-server": "/rootfs", "rpm-build": "/var/lib/mock/scroll-secure/root"}
 
 
 def build_stages(prefix, keydir, only=None):
@@ -76,12 +83,14 @@ def build_stages(prefix, keydir, only=None):
     sign = ["--secret", f"id=secureboot_key,src={keydir}/k", "--secret", f"id=secureboot_crt,src={keydir}/c",
             "--secret", f"id=pcr_key,src={keydir}/k"]
     uki = ["--build-arg", f"RELEASE={release}", "--build-arg", f"MINIMAL_DIGEST={arg('MINIMAL_DIGEST')}"]
-    ctx = ["--build-arg", "RUN_NETWORK=host", "--build-context", "lockscreen=../lockscreen", "--build-context", "vmgui=../vmgui",
+    ctx = ["--build-arg", "RUN_NETWORK=host", "--cap-add=SYS_ADMIN", "--build-context", "lockscreen=../lockscreen",
+           "--build-context", "desktop=../desktop", "--build-context", "vmgui=../vmgui",
            "--build-context", "vmswitch=../vmswitch", "--build-context", "llm=../llm"]
     t = lambda s: f"{prefix}-lock-{s}"
     steps = [
-        (["-f", "Containerfile", *ctx, "--target", "scroll-build"], "scroll-build", img["fedora"]),
-        (["-f", "Containerfile", *ctx, "--target", "lockscreen-build"], "lockscreen-build", img["fedora"]),
+        # mock-cfg.sh and make-srpm.sh need SOURCE_DATE_EPOCH (any value resolves the same).
+        (["-f", "Containerfile", *ctx, "--build-arg", f"SOURCE_DATE_EPOCH={commit_time()}", "--target", "rpm-build"],
+         "rpm-build", img["fedora"]),
         (["-f", "Containerfile", *ctx], "rootfs", img["base"]),
         (["-f", "uki/Containerfile.systemd-boot", *uki, *sign, "--target", "builder"], "systemd-boot", img["minimal"]),
         (["-f", "uki/Containerfile.addons", *uki, *sign, "--target", "builder"], "addons", img["minimal"]),
@@ -107,7 +116,9 @@ def build_stages(prefix, keydir, only=None):
     out = []
     for opts, stage, base in steps:
         ctxdir = "../llm" if "../llm/Containerfile" in opts else "."
-        run("podman", "build", "--pull=missing", "-t", t(stage), *opts, ctxdir, cwd=HERE)
+        # --no-cache: a cached `dnf install` layer would re-lock the old resolution,
+        # RPMs Koji may have pruned since included.
+        run("podman", "build", "--pull=missing", "--no-cache", "-t", t(stage), *opts, ctxdir, cwd=HERE)
         if base:
             out.append((stage, t(stage), base))
     return out
@@ -132,9 +143,17 @@ RPM_MAGIC = b"\xed\xab\xee\xdb"
 
 def sha256_url(url):
     """sha256 of the file at url, or None if it isn't an RPM (Koji answers RPMs it may
-    not distribute, like Cisco's openh264, with a redirect to a wiki page)."""
+    not distribute, like Cisco's openh264, with a redirect to a wiki page) or Koji has
+    no such file (404: a signed copy not there, or pruned)."""
     h = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=120) as r:
+    try:
+        r = urllib.request.urlopen(url, timeout=120)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:   # not (or no longer) on Koji: use the repo's copy
+            print(f"rpmlock: 404, using the repo location instead: {url}", file=sys.stderr)
+            return None
+        raise
+    with r:
         first = r.read(1 << 20)
         if not first.startswith(RPM_MAGIC):
             return None
@@ -178,7 +197,7 @@ def update(prefix, only=None):
                 urls.setdefault(nevra, url)
             elif keyid(sig):
                 other.setdefault(nevra, image)
-            else:  # unsigned: a local RPM (scroll from stage 1), not from a repo
+            else:  # unsigned: a local RPM (scroll, scroll-secure-desktop from stage 1), not from a repo
                 per_stage[stage].remove(nevra)
     print(f"rpmlock: hashing {len(urls)} RPMs from Koji", file=sys.stderr)
     sums = hash_all(urls)

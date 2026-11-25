@@ -1,0 +1,114 @@
+# scroll-secure-desktop: the desktop layer of the scroll-secure image on top of
+# the scroll RPM (our hardened fork): our scroll config and sessions, the SDDM
+# session wrapper, the key-binding cheatsheet wallpaper, and hardened-unlock (the
+# FIDO2 lock screen) with its duress-reset helper.
+#
+# Built by mock (desktop/README.md); desktop/make-srpm.sh fills in @VERSION@ and
+# packs the sources: desktop/files, keys-wallpaper.py and ../lockscreen with its
+# Go modules vendored (mock builds offline).
+#
+# Reproducible: SOURCE_DATE_EPOCH comes from the build (mock-cfg.sh), not from a
+# changelog, and file mtimes are clamped to it.
+%global source_date_epoch_from_changelog 0
+%global clamp_mtime_to_source_date_epoch 1
+# Go: no debuginfo split, and duress-reset (static, internal linker) has no GNU
+# build-id; no /usr/lib/.build-id links in the image.
+%global debug_package %{nil}
+%global _missing_build_ids_terminate_build 0
+%global _build_id_links none
+
+Name:           scroll-secure-desktop
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        scroll-secure desktop: scroll config, sessions, wallpaper, FIDO2 lock screen
+License:        LicenseRef-Unspecified
+URL:            https://github.com/wildcommitter/fedora-secureblue-tpm-fido2
+Source0:        %{name}-%{version}.tar
+
+ExclusiveArch:  x86_64
+
+BuildRequires:  golang
+BuildRequires:  gcc
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  pkgconfig(gtk4)
+BuildRequires:  pkgconfig(gtk4-layer-shell-0)
+BuildRequires:  gobject-introspection-devel
+BuildRequires:  pam-devel
+BuildRequires:  libxcrypt-devel
+BuildRequires:  systemd-rpm-macros
+# keys-wallpaper.py: SVG rendered by ImageMagick's librsvg delegate, Adwaita fonts
+BuildRequires:  python3
+BuildRequires:  ImageMagick
+BuildRequires:  librsvg2
+BuildRequires:  adwaita-sans-fonts
+BuildRequires:  adwaita-mono-fonts
+
+# Our config is for our fork: only its hardened build (no IPC, no Lua, sandbox).
+Requires:       scroll
+Requires:       pam-u2f
+Requires:       swaybg
+Requires:       swayidle
+
+%description
+The desktop layer of the scroll-secure workstation image: /etc/scroll/config
+(niri-style, read by the sessions only from /etc), the session entries and the
+SDDM wrapper that starts them without the user's shell startup files, a
+headless pixman session for wayvnc, the key-binding cheatsheet wallpaper drawn
+from the shipped config, and hardened-unlock: a session lock that needs the
+FIDO2 key (PIN + touch) and then the account password, with a duress canary
+that hard-resets the machine through the socket-activated duress-reset helper.
+
+%prep
+%setup -q
+
+%build
+export GOTOOLCHAIN=local GOFLAGS=-mod=vendor GOPROXY=off GOPATH="$PWD/.gopath" GOCACHE="$PWD/.gocache"
+cd lockscreen
+go build -trimpath -o ../_out/hardened-unlock ./cmd/hardened-unlock
+# duress-reset is the root-side helper of the duress canary: static, no cgo.
+CGO_ENABLED=0 go build -trimpath -o ../_out/duress-reset ./cmd/duress-reset
+cd ..
+# The wallpaper, from the config as shipped: ours plus every config.d snippet.
+mkdir -p _root/etc/scroll/config.d
+cp files/etc/scroll/config.d/* lockscreen/etc/scroll/config.d/* _root/etc/scroll/config.d/
+python3 -I keys-wallpaper.py --root _root files/etc/scroll/config _out/keys.png
+
+%install
+cp -a files/. %{buildroot}/
+install -Dpm 0755 _out/hardened-unlock %{buildroot}%{_bindir}/hardened-unlock
+install -Dpm 0755 _out/duress-reset %{buildroot}%{_libexecdir}/hardened-unlock/duress-reset
+install -Dpm 0644 _out/keys.png %{buildroot}%{_datadir}/scroll-secure/keys.png
+install -Dpm 0644 lockscreen/etc/pam.d/hardened-unlock %{buildroot}%{_sysconfdir}/pam.d/hardened-unlock
+install -Dpm 0644 lockscreen/etc/scroll/config.d/50-hardened-unlock.conf \
+    %{buildroot}%{_sysconfdir}/scroll/config.d/50-hardened-unlock.conf
+install -Dpm 0644 -t %{buildroot}%{_unitdir} lockscreen/usr/lib/systemd/system/hardened-unlock-duress.*
+install -Dpm 0644 lockscreen/usr/lib/sysusers.d/hardened-unlock.conf %{buildroot}%{_sysusersdir}/hardened-unlock.conf
+
+%check
+# The production locker must not contain the duresstest hook.
+! grep -q HARDENED_UNLOCK_DURESS_MARKER %{buildroot}%{_bindir}/hardened-unlock
+test -s %{buildroot}%{_datadir}/scroll-secure/keys.png
+grep -qx 'Exec=scroll -c /etc/scroll/config' %{buildroot}%{_datadir}/wayland-sessions/scroll.desktop
+grep -qx 'include /etc/scroll/config.d/\*' %{buildroot}%{_sysconfdir}/scroll/config
+
+%files
+%config(noreplace) %{_sysconfdir}/scroll/config
+%config(noreplace) %{_sysconfdir}/scroll/headless.conf
+%config(noreplace) %{_sysconfdir}/scroll/config.d/10-desktop.conf
+%config(noreplace) %{_sysconfdir}/scroll/config.d/50-hardened-unlock.conf
+%config(noreplace) %{_sysconfdir}/pam.d/hardened-unlock
+%{_bindir}/hardened-unlock
+%dir %{_libexecdir}/hardened-unlock
+%{_libexecdir}/hardened-unlock/duress-reset
+%attr(0755,root,root) %{_libexecdir}/scroll-headless
+%dir %{_libexecdir}/scroll-secure
+%attr(0755,root,root) %{_libexecdir}/scroll-secure/wayland-session
+%{_unitdir}/hardened-unlock-duress.service
+%{_unitdir}/hardened-unlock-duress.socket
+%{_sysusersdir}/hardened-unlock.conf
+%{_userunitdir}/scroll-headless.service
+%{_prefix}/lib/sddm/sddm.conf.d/zz-scroll-secure.conf
+%{_datadir}/wayland-sessions/scroll.desktop
+%{_datadir}/wayland-sessions/scroll-pixman.desktop
+%dir %{_datadir}/scroll-secure
+%{_datadir}/scroll-secure/keys.png

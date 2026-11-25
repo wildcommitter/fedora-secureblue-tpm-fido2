@@ -27,7 +27,7 @@ release=$(sed -n 's/^ARG FEDORA_VERSION=//p' Containerfile)
 minimal="quay.io/fedora/fedora-minimal:${release}@$(sed -n 's/^ARG MINIMAL_DIGEST=//p' Containerfile)"
 sde="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2> /dev/null || true)}"
 [[ "${sde}" =~ ^[0-9]+$ ]] || { echo "not a git checkout: set SOURCE_DATE_EPOCH" >&2; exit 1; }
-if [[ -z "${SOURCE_DATE_EPOCH:-}" ]] && [[ -n "$(git status --porcelain -- . ../lockscreen ../vmgui ../vmswitch)" ]]; then
+if [[ -z "${SOURCE_DATE_EPOCH:-}" ]] && [[ -n "$(git status --porcelain -- . ../lockscreen ../desktop ../vmgui ../vmswitch)" ]]; then
     echo "warning: uncommitted changes; this build is not the commit's" >&2
 fi
 # Intermediate image names; BUILD_PREFIX keeps parallel (lab) builds apart.
@@ -61,7 +61,10 @@ rm -rf out
 trap 'rm -rf out' EXIT
 
 set -x
-podman build "${repro[@]}" -t "${p}-rootfs" -f Containerfile --build-context lockscreen=../lockscreen \
+# SYS_ADMIN: the rpm-build stage runs mock, which unshares namespaces and mounts in
+# its chroot (only inside this rootless build's user namespace).
+podman build "${repro[@]}" --cap-add=SYS_ADMIN -t "${p}-rootfs" -f Containerfile \
+    --build-context lockscreen=../lockscreen --build-context desktop=../desktop \
     --build-context vmgui=../vmgui --build-context vmswitch=../vmswitch --build-context llm=../llm .
 podman build "${repro[@]}" "${offline[@]}" -t "${p}-kernel" -f uki/Containerfile.kernel --build-arg "BASE=${p}-rootfs" .
 # --no-cache on every signing build: podman's layer cache doesn't key on secret

@@ -6,6 +6,7 @@
 # build outputs
 image/out/
 image/local/
+desktop/out/
 lockscreen/out/
 vmgui/guest/out/
 llm/out/
